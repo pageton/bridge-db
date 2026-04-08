@@ -15,6 +15,7 @@ var (
 	destURL   string
 	logLevel  string
 	logJSON   bool
+	Version   string
 )
 
 // rootCmd is the base command for the bridge CLI.
@@ -36,6 +37,19 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file path")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level (debug, info, warn, error)")
 	rootCmd.PersistentFlags().BoolVar(&logJSON, "log-json", false, "output logs in JSON format")
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print the version number",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("bridge %s\n", Version)
+		},
+	})
+}
+
+// SetVersion sets the version string (called from main via ldflags).
+func SetVersion(v string) {
+	Version = v
 }
 
 // Execute runs the root command.

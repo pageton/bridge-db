@@ -6,24 +6,21 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      flake-utils,
-    }:
+  outputs = {
+    self,
+    nixpkgs,
+    flake-utils,
+  }:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
+      system: let
         pkgs = nixpkgs.legacyPackages.${system};
         version = "0.1.0";
-      in
-      {
+      in {
         packages.default = pkgs.buildGoModule {
           pname = "bridge";
           inherit version;
           src = ./.;
-          vendorHash = "sha256-IiSyTvu4K5KeXxzvqWboYwIGeZgOKY8//HBAJtpu75g=";
+          vendorHash = "sha256-c0nMn6vrZQzvAt/W0MZOCErWCERVTsw6QfjkNhDG44A=";
           ldflags = [
             "-s"
             "-w"
