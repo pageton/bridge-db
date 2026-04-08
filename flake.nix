@@ -6,16 +6,19 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    flake-utils,
-  }:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
     flake-utils.lib.eachDefaultSystem (
-      system: let
+      system:
+      let
         pkgs = nixpkgs.legacyPackages.${system};
         version = "0.1.0";
-      in {
+      in
+      {
         packages.default = pkgs.buildGoModule {
           pname = "bridge";
           inherit version;
@@ -24,6 +27,7 @@
           ldflags = [
             "-s"
             "-w"
+            "-X main.version=${version}"
           ];
           meta = with pkgs.lib; {
             description = "Database migration CLI for Redis, MongoDB, PostgreSQL, MySQL, MariaDB, CockroachDB, MSSQL, and SQLite";
