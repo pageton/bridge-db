@@ -1,0 +1,304 @@
+package cockroachdb
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+
+	"github.com/bytedance/sonic"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/pageton/bridge-db/internal/logger"
+	"github.com/pageton/bridge-db/pkg/provider"
+)
+
+type cockroachDBScanner struct {
+	pool            *pgxpool.Pool
+	opts            provider.ScanOptions
+	stats           provider.ScanStats
+	tables          []tableInfo
+	currentTable    int
+	rows            pgx.Rows
+	columns         []columnInfo
+	pkColumns       []string
+	done            bool
+	tablesCompleted map[string]bool
+	log             interface{ Info(msg string, args ...any) }
+}
+
+type tableInfo struct {
+	Schema string
+	Name   string
+}
+
+type columnInfo struct {
+	Name     string
+	Type     string
+	Nullable bool
+}
+
+func newCockroachDBScanner(pool *pgxpool.Pool, opts provider.ScanOptions) *cockroachDBScanner {
+	s := &cockroachDBScanner{
+		pool: pool,
+		opts: opts,
+		log:  logger.L().With("component", "cockroachdb-scanner"),
+	}
+	if len(opts.ResumeToken) > 0 {
+		if stats, err := unmarshalScanToken(opts.ResumeToken); err == nil {
+			s.stats = stats
+			s.currentTable = stats.TablesDone
+			s.log.Info("resuming from checkpoint",
+				"tables_done", stats.TablesDone,
+				"tables_total", stats.TablesTotal,
+				"rows_scanned", stats.TotalScanned,
+			)
+		}
+	}
+	if len(opts.TablesCompleted) > 0 {
+		s.tablesCompleted = make(map[string]bool, len(opts.TablesCompleted))
+		for _, t := range opts.TablesCompleted {
+			s.tablesCompleted[t] = true
+		}
+	}
+	return s
+}
+
+func (s *cockroachDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit, error) {
+	if s.done {
+		return nil, io.EOF
+	}
+	batchSize := s.opts.BatchSize
+	if batchSize <= 0 {
+		batchSize = 1000
+	}
+	if s.tables == nil {
+		if err := s.listTables(ctx); err != nil {
+			return nil, err
+		}
+		if len(s.tables) == 0 {
+			s.done = true
+			return nil, io.EOF
+		}
+	}
+	units := make([]provider.MigrationUnit, 0, batchSize)
+	for len(units) < batchSize && !s.done {
+		if s.rows != nil && s.rows.Next() {
+			unit, err := s.readRow(ctx)
+			if err != nil {
+				s.log.Info("failed to read row, skipping",
+					"table", s.tables[s.currentTable].Name, "error", err)
+				continue
+			}
+			units = append(units, *unit)
+			s.stats.TotalScanned++
+			s.stats.TotalBytes += unit.Size
+			continue
+		}
+		if s.rows != nil {
+			if err := s.rows.Err(); err != nil {
+				s.log.Info("row error", "table", s.tables[s.currentTable].Name, "error", err)
+			}
+			s.rows.Close()
+			s.rows = nil
+			s.currentTable++
+			s.stats.TablesDone++
+		}
+		if s.currentTable >= len(s.tables) {
+			s.done = true
+			break
+		}
+		table := s.tables[s.currentTable]
+		s.log.Info("scanning table", "schema", table.Schema, "table", table.Name)
+		if err := s.getTableInfo(ctx, table); err != nil {
+			s.log.Info("failed to get table info", "table", table.Name, "error", err)
+			s.currentTable++
+			s.stats.TablesDone++
+			continue
+		}
+		query := s.buildScanQuery(table)
+		rows, err := s.pool.Query(ctx, query)
+		if err != nil {
+			s.log.Info("failed to open cursor for table", "table", table.Name, "error", err)
+			s.currentTable++
+			s.stats.TablesDone++
+			continue
+		}
+		s.rows = rows
+	}
+	if len(units) == 0 {
+		return nil, io.EOF
+	}
+	return units, nil
+}
+
+func (s *cockroachDBScanner) Stats() provider.ScanStats { return s.stats }
+
+func (s *cockroachDBScanner) listTables(ctx context.Context) error {
+	rows, err := s.pool.Query(ctx, `
+		SELECT table_schema, table_name
+		FROM information_schema.tables
+		WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'crdb_internal')
+		AND table_type = 'BASE TABLE'
+		ORDER BY table_schema, table_name`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var tables []tableInfo
+	for rows.Next() {
+		var t tableInfo
+		if err := rows.Scan(&t.Schema, &t.Name); err != nil {
+			continue
+		}
+		tables = append(tables, t)
+	}
+	s.tables = tables
+	s.stats.TablesTotal = len(tables)
+
+	if len(s.tablesCompleted) > 0 {
+		filtered := tables[:0]
+		for _, t := range tables {
+			if !s.tablesCompleted[t.Schema+"."+t.Name] {
+				filtered = append(filtered, t)
+			}
+		}
+		s.tables = filtered
+		s.stats.TablesTotal = len(filtered)
+		if s.currentTable > len(s.tables) {
+			s.currentTable = len(s.tables)
+		}
+	}
+	s.log.Info("found tables", "count", len(s.tables))
+	return nil
+}
+
+func (s *cockroachDBScanner) getTableInfo(ctx context.Context, table tableInfo) error {
+	rows, err := s.pool.Query(ctx, `
+		SELECT column_name, data_type, is_nullable
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2
+		ORDER BY ordinal_position`, table.Schema, table.Name)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var columns []columnInfo
+	for rows.Next() {
+		var col columnInfo
+		var nullable string
+		if err := rows.Scan(&col.Name, &col.Type, &nullable); err != nil {
+			continue
+		}
+		col.Nullable = nullable == "YES"
+		columns = append(columns, col)
+	}
+	s.columns = columns
+
+	pkRows, err := s.pool.Query(ctx, `
+		SELECT kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+			AND tc.table_schema = $1
+			AND tc.table_name = $2
+		ORDER BY kcu.ordinal_position`, table.Schema, table.Name)
+	if err != nil {
+		return err
+	}
+	defer pkRows.Close()
+
+	var pkColumns []string
+	for pkRows.Next() {
+		var col string
+		if err := pkRows.Scan(&col); err != nil {
+			continue
+		}
+		pkColumns = append(pkColumns, col)
+	}
+	if len(pkColumns) == 0 {
+		for _, col := range columns {
+			pkColumns = append(pkColumns, col.Name)
+		}
+	}
+	s.pkColumns = pkColumns
+	return nil
+}
+
+func (s *cockroachDBScanner) buildScanQuery(table tableInfo) string {
+	colNames := make([]string, len(s.columns))
+	for i, col := range s.columns {
+		colNames[i] = quoteIdentifier(col.Name)
+	}
+	orderBy := make([]string, len(s.pkColumns))
+	for i, col := range s.pkColumns {
+		orderBy[i] = quoteIdentifier(col)
+	}
+	return fmt.Sprintf("SELECT %s FROM %s.%s ORDER BY %s",
+		strings.Join(colNames, ", "),
+		quoteIdentifier(table.Schema), quoteIdentifier(table.Name),
+		strings.Join(orderBy, ", "))
+}
+
+func (s *cockroachDBScanner) readRow(_ context.Context) (*provider.MigrationUnit, error) {
+	table := s.tables[s.currentTable]
+	values := make([]any, len(s.columns))
+	valuePtrs := make([]any, len(s.columns))
+	for i := range values {
+		valuePtrs[i] = &values[i]
+	}
+	if err := s.rows.Scan(valuePtrs...); err != nil {
+		return nil, err
+	}
+	data := make(map[string]any)
+	pk := make(map[string]any)
+	columnTypes := make(map[string]string)
+	for i, col := range s.columns {
+		val := convertValue(values[i], col.Type)
+		data[col.Name] = val
+		columnTypes[col.Name] = col.Type
+		for _, pkCol := range s.pkColumns {
+			if col.Name == pkCol {
+				pk[col.Name] = val
+				break
+			}
+		}
+	}
+	row := &cockroachDBRow{
+		Table: table.Name, Schema: table.Schema,
+		PrimaryKey: pk, Data: data, ColumnTypes: columnTypes,
+	}
+	rowData, err := encodeCockroachDBRow(row)
+	if err != nil {
+		return nil, err
+	}
+	key := buildRowKey(table.Schema, table.Name, pk)
+	return &provider.MigrationUnit{
+		Key: key, Table: table.Name, DataType: provider.DataTypeRow,
+		Data: rowData, Metadata: map[string]any{"schema": table.Schema, "table": table.Name, "primary_key": pk},
+		Size: int64(len(rowData)),
+	}, nil
+}
+
+func quoteIdentifier(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+func unmarshalScanToken(token []byte) (provider.ScanStats, error) {
+	if len(token) == 0 {
+		return provider.ScanStats{}, nil
+	}
+	var m map[string]int64
+	if err := sonic.Unmarshal(token, &m); err != nil {
+		return provider.ScanStats{}, err
+	}
+	return provider.ScanStats{
+		TotalScanned: m["total_scanned"], TotalBytes: m["total_bytes"],
+		TablesDone: int(m["tables_done"]), TablesTotal: int(m["tables_total"]),
+	}, nil
+}
