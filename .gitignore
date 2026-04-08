@@ -1,0 +1,10 @@
+build/
+vendor/
+result
+*.exe
+coverage.out
+coverage.html
+.bridge-checkpoint.json
+.bridge-db/
+*.pem
+.seed-data/
