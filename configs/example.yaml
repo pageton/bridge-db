@@ -1,0 +1,98 @@
+# Bridge-DB Example Configuration
+# ==================================
+# Copy this file and modify for your migration scenario.
+# See configs/ directory for provider-specific examples.
+
+source:
+  provider: postgres
+  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=prefer"
+
+  # Provider-specific overrides (override URL-parsed values)
+  # Uncomment and edit the block for your source provider.
+
+  # postgres:
+  #   host: "localhost"
+  #   port: 5432
+  #   username: "postgres"
+  #   password: "secret"
+  #   database: "myapp"
+  #   ssl_mode: "disable"
+
+  # mysql:
+  #   host: "localhost"
+  #   port: 3306
+  #   username: "root"
+  #   password: "secret"
+  #   database: "myapp"
+
+  # mariadb:
+  #   host: "localhost"
+  #   port: 3306
+  #   username: "root"
+  #   password: "secret"
+  #   database: "myapp"
+
+  # cockroachdb:
+  #   host: "localhost"
+  #   port: 26257
+  #   username: "root"
+  #   password: ""
+  #   database: "myapp"
+  #   ssl_mode: "disable"
+
+  # mssql:
+  #   host: "localhost"
+  #   port: 1433
+  #   username: "sa"
+  #   password: "secret"
+  #   database: "myapp"
+
+  # sqlite:
+  #   database: "/path/to/myapp.db"
+
+  # redis:
+  #   host: "localhost"
+  #   port: 6379
+  #   username: ""
+  #   password: "secret"
+  #   db: 0
+  #   tls: false
+
+  # mongodb:
+  #   host: "localhost"
+  #   port: 27017
+  #   username: "admin"
+  #   password: "secret"
+  #   database: "myapp"
+  #   auth_source: "admin"
+
+  # SSH tunnel (optional)
+  # ssh:
+  #   enabled: true
+  #   host: bastion.example.com
+  #   port: 22
+  #   username: deploy
+  #   password: ""                    # use password or key_file
+  #   key_file: "~/.ssh/id_rsa"      # SSH private key path
+
+destination:
+  provider: mysql
+  url: "mysql://USER:PASSWORD@tcp(localhost:3306)/myapp"
+
+pipeline:
+  batch_size: 1000
+  dry_run: false
+  verify: true
+  conflict_strategy: overwrite
+  migrate_schema: true
+  fk_handling: defer_constraints
+  max_retries: 3
+  retry_backoff: 500ms
+
+checkpoint:
+  enabled: true
+  path: ".bridge-db/checkpoint.json"
+
+logging:
+  level: info
+  json: false

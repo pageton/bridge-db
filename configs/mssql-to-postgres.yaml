@@ -1,0 +1,38 @@
+# MSSQL to PostgreSQL Migration
+# ===============================
+# Migrate a Microsoft SQL Server database to PostgreSQL.
+# Supports schema migration, type mapping, and data verification.
+
+source:
+  provider: mssql
+  url: "mssql://USER:PASSWORD@localhost:1433/myapp"
+
+  # Or use individual overrides:
+  # mssql:
+  #   host: "localhost"
+  #   port: 1433
+  #   username: "sa"
+  #   password: "PASSWORD"
+  #   database: "myapp"
+
+destination:
+  provider: postgres
+  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=prefer"
+
+pipeline:
+  batch_size: 2000
+  dry_run: false
+  verify: true
+  conflict_strategy: overwrite
+  migrate_schema: true
+  fk_handling: defer_constraints
+  max_retries: 3
+  retry_backoff: 500ms
+
+checkpoint:
+  enabled: true
+  path: ".bridge-checkpoint-mssql-pg.json"
+
+logging:
+  level: info
+  json: false

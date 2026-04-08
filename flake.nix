@@ -1,0 +1,52 @@
+{
+  description = "bridge — database migration CLI (Redis, MongoDB, PostgreSQL, MySQL, MariaDB, CockroachDB, MSSQL, SQLite)";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+        version = "0.1.0";
+      in
+      {
+        packages.default = pkgs.buildGoModule {
+          pname = "bridge";
+          inherit version;
+          src = ./.;
+          vendorHash = "sha256-IiSyTvu4K5KeXxzvqWboYwIGeZgOKY8//HBAJtpu75g=";
+          ldflags = [
+            "-s"
+            "-w"
+          ];
+          meta = with pkgs.lib; {
+            description = "Database migration CLI for Redis, MongoDB, PostgreSQL, MySQL, MariaDB, CockroachDB, MSSQL, and SQLite";
+            license = licenses.mit;
+            mainProgram = "bridge";
+          };
+        };
+
+        devShells.default = pkgs.mkShell {
+          packages = with pkgs; [
+            go
+            gopls
+            gotools
+          ];
+        };
+
+        apps.default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/bridge";
+        };
+      }
+    );
+}

@@ -1,0 +1,39 @@
+# CockroachDB to MariaDB Migration
+# ==================================
+# Migrate a CockroachDB database to MariaDB.
+# Supports schema migration, type mapping, and data verification.
+
+source:
+  provider: cockroachdb
+  url: "cockroachdb://USER:PASSWORD@localhost:26257/myapp?sslmode=prefer"
+
+  # Or use individual overrides:
+  # cockroachdb:
+  #   host: "localhost"
+  #   port: 26257
+  #   username: "root"
+  #   password: "PASSWORD"
+  #   database: "myapp"
+  #   ssl_mode: "prefer"
+
+destination:
+  provider: mariadb
+  url: "mariadb://USER:PASSWORD@localhost:3306/myapp"
+
+pipeline:
+  batch_size: 1000
+  dry_run: false
+  verify: true
+  conflict_strategy: overwrite
+  migrate_schema: true
+  fk_handling: defer_constraints
+  max_retries: 3
+  retry_backoff: 500ms
+
+checkpoint:
+  enabled: true
+  path: ".bridge-checkpoint-crdb-maria.json"
+
+logging:
+  level: info
+  json: false

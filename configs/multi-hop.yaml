@@ -1,0 +1,30 @@
+# Multi-Hop Migration Example
+# =============================
+# This file demonstrates a multi-step migration pipeline.
+# Run each step sequentially using separate config files or commands.
+#
+# Step 1: MSSQL → PostgreSQL   (see mssql-to-postgres.yaml)
+# Step 2: CockroachDB → MariaDB (see cockroachdb-to-mariadb.yaml)
+# Step 3: SQLite → MySQL        (see sqlite-to-mysql.yaml)
+#
+# Usage:
+#   bridge migrate -c configs/mssql-to-postgres.yaml
+#   bridge migrate -c configs/cockroachdb-to-mariadb.yaml
+#   bridge migrate -c configs/sqlite-to-mysql.yaml
+#
+# Or use a shell script to chain them:
+#
+#   #!/bin/sh
+#   set -e
+#   echo "Step 1: MSSQL -> PostgreSQL"
+#   bridge migrate -c configs/mssql-to-postgres.yaml
+#   echo "Step 2: CockroachDB -> MariaDB"
+#   bridge migrate -c configs/cockroachdb-to-mariadb.yaml
+#   echo "Step 3: SQLite -> MySQL"
+#   bridge migrate -c configs/sqlite-to-mysql.yaml
+#   echo "All migrations complete."
+#
+# With nix:
+#   nix run github:pageton/bridge-db -- migrate -c configs/mssql-to-postgres.yaml && \
+#   nix run github:pageton/bridge-db -- migrate -c configs/cockroachdb-to-mariadb.yaml && \
+#   nix run github:pageton/bridge-db -- migrate -c configs/sqlite-to-mysql.yaml

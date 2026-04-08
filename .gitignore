@@ -8,3 +8,4 @@ coverage.html
 .bridge-db/
 *.pem
 .seed-data/
+bridge
