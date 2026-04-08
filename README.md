@@ -535,4 +535,4 @@ docker run -d --name mssql -e 'ACCEPT_EULA=Y' -e 'MSSQL_SA_PASSWORD=BridgeDb123!
 
 ## License
 
-MIT
+[MIT](LICENSE)
