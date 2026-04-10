@@ -36,9 +36,9 @@ func encodeMongoDocument(doc *mongoDocument) ([]byte, error) {
 	}
 
 	envelope := map[string]any{
-		"collection":  doc.Collection,
-		"document_id": doc.DocumentID,
-		"document":    docMap,
+		"collection":    doc.Collection,
+		"document_id":   doc.DocumentID,
+		"document":      docMap,
 		"document_bson": []byte(doc.Data),
 	}
 

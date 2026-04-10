@@ -29,10 +29,10 @@ func init() {
 }
 
 type cockroachDBPassthroughTransformer struct {
-	src string
-	dst string
+	src    string
+	dst    string
 	schema *provider.Schema
-	cfg TransformerConfig
+	cfg    TransformerConfig
 }
 
 func (t *cockroachDBPassthroughTransformer) Transform(ctx context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {

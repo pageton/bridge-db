@@ -554,7 +554,7 @@ func TestValuesEqual_NormalizesByteDecimalAndPgNumeric(t *testing.T) {
 func TestNormalizeRecordsForComparison_FlattensRedisHashEnvelope(t *testing.T) {
 	src := map[string]any{"id": 1, "name": "alice"}
 	dst := map[string]any{
-		"type": "hash",
+		"type":  "hash",
 		"value": map[string]any{"id": 1, "name": "alice"},
 		"ttl":   int64(0),
 	}

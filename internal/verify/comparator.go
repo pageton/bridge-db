@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"strconv"
 
-	"github.com/pageton/bridge-db/pkg/provider"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/pageton/bridge-db/pkg/provider"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 

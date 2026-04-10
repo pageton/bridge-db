@@ -31,9 +31,9 @@ func init() {
 }
 
 type mariadbPassthroughTransformer struct {
-	src   string
-	dst   string
-	cfg   TransformerConfig
+	src    string
+	dst    string
+	cfg    TransformerConfig
 	schema *provider.Schema
 }
 
@@ -72,7 +72,7 @@ func (t *mariadbPassthroughTransformer) Transform(ctx context.Context, units []p
 	}
 }
 
-func (t *mariadbPassthroughTransformer) NeedsSchema() bool { return true }
+func (t *mariadbPassthroughTransformer) NeedsSchema() bool            { return true }
 func (t *mariadbPassthroughTransformer) SetSchema(s *provider.Schema) { t.schema = s }
 func (t *mariadbPassthroughTransformer) TypeMapper() provider.TypeMapper {
 	return mariadbTypeMapper{src: t.src, dst: t.dst}
