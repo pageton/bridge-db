@@ -6,7 +6,7 @@ import (
 	"github.com/pageton/bridge-db/internal/cli"
 )
 
-var version = "0.1.1"
+var version = "0.1.2"
 
 func main() {
 	cli.SetVersion(version)
