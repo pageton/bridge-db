@@ -85,8 +85,8 @@ func SetVersion(v string) {
 	Version = v
 }
 
-// Execute runs the root command.
-func Execute() {
+// Execute runs the root command and returns an exit code.
+func Execute() int {
 	if err := rootCmd.Execute(); err != nil {
 		// Provide actionable hints for common configuration errors.
 		msg := err.Error()
@@ -105,8 +105,9 @@ func Execute() {
 			fmt.Fprintln(os.Stderr, "  Heavy providers (mongodb, mssql, sqlite, redis) require build tags.")
 		}
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 // loadConfig loads configuration from file, flags, or environment.
