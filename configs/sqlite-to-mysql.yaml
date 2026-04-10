@@ -1,5 +1,5 @@
 # SQLite to MySQL Migration
-# ==========================
+# -------------------------
 # Migrate a local SQLite database to MySQL.
 # Useful for promoting a dev/embedded database to a production server.
 
@@ -9,7 +9,7 @@ source:
 
   # Or use individual override:
   # sqlite:
-  #   database: "/data/myapp.db"
+  #   path: "/data/myapp.db"
 
 destination:
   provider: mysql

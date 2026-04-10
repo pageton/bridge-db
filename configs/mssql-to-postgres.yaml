@@ -1,5 +1,5 @@
 # MSSQL to PostgreSQL Migration
-# ===============================
+# ------------------------------
 # Migrate a Microsoft SQL Server database to PostgreSQL.
 # Supports schema migration, type mapping, and data verification.
 
@@ -17,7 +17,7 @@ source:
 
 destination:
   provider: postgres
-  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=prefer"
+  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=require"
 
 pipeline:
   batch_size: 2000

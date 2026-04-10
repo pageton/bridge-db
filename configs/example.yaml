@@ -1,11 +1,11 @@
 # Bridge-DB Example Configuration
-# ==================================
+# ----------------------------------
 # Copy this file and modify for your migration scenario.
 # See configs/ directory for provider-specific examples.
 
 source:
   provider: postgres
-  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=prefer"
+  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=require"
 
   # Provider-specific overrides (override URL-parsed values)
   # Uncomment and edit the block for your source provider.
@@ -48,7 +48,7 @@ source:
   #   database: "myapp"
 
   # sqlite:
-  #   database: "/path/to/myapp.db"
+  #   path: "/path/to/myapp.db"
 
   # redis:
   #   host: "localhost"
