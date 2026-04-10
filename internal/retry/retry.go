@@ -23,6 +23,11 @@ type Config struct {
 
 	// Multiplier is the backoff multiplier (typically 2.0).
 	Multiplier float64
+
+	// Operation is a short description of what is being retried (e.g. "scan",
+	// "write batch 42", "connect source"). When set, retry log messages include
+	// this label for easier debugging. When empty, no operation label is logged.
+	Operation string
 }
 
 // DefaultConfig returns sensible defaults.
@@ -31,6 +36,17 @@ func DefaultConfig() Config {
 		MaxAttempts:     3,
 		InitialInterval: 500 * time.Millisecond,
 		MaxInterval:     30 * time.Second,
+		Multiplier:      2.0,
+	}
+}
+
+// ConnectionRetryConfig returns a retry config tuned for connection and tunnel
+// establishment: 3 attempts, 1s initial backoff, 10s max, 2x multiplier.
+func ConnectionRetryConfig() Config {
+	return Config{
+		MaxAttempts:     3,
+		InitialInterval: 1 * time.Second,
+		MaxInterval:     10 * time.Second,
 		Multiplier:      2.0,
 	}
 }
@@ -49,12 +65,23 @@ func Do(ctx context.Context, cfg Config, fn func() error) error {
 
 		if attempt < cfg.MaxAttempts-1 {
 			delay := backoff(cfg, attempt)
-			logger.L().Warn("retry attempt failed, backing off",
-				"attempt", attempt+1,
-				"max_attempts", cfg.MaxAttempts,
-				"backoff", delay,
-				"error", lastErr,
-			)
+
+			if cfg.Operation != "" {
+				logger.L().Warn("retrying operation",
+					"operation", cfg.Operation,
+					"attempt", attempt+1,
+					"max_attempts", cfg.MaxAttempts,
+					"backoff", delay,
+					"error", lastErr,
+				)
+			} else {
+				logger.L().Warn("retry attempt failed, backing off",
+					"attempt", attempt+1,
+					"max_attempts", cfg.MaxAttempts,
+					"backoff", delay,
+					"error", lastErr,
+				)
+			}
 
 			select {
 			case <-ctx.Done():
@@ -62,6 +89,9 @@ func Do(ctx context.Context, cfg Config, fn func() error) error {
 			case <-time.After(delay):
 			}
 		}
+	}
+	if cfg.Operation != "" {
+		return fmt.Errorf("%s: exhausted after %d attempts: %w", cfg.Operation, cfg.MaxAttempts, lastErr)
 	}
 	return fmt.Errorf("retry exhausted after %d attempts: %w", cfg.MaxAttempts, lastErr)
 }
