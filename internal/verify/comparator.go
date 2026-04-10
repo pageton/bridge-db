@@ -2,10 +2,14 @@ package verify
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pageton/bridge-db/pkg/provider"
@@ -15,13 +19,13 @@ import (
 // compareRecords reads records from both sides and compares field-by-field,
 // recording mismatches into the TableResult.
 func compareRecords(
-	_ context.Context,
+	ctx context.Context,
 	srcReader, dstReader provider.VerifyReader,
 	table string,
 	keys []string,
 	tr *TableResult,
 ) {
-	srcRecords, err := srcReader.ReadRecords(context.Background(), keys)
+	srcRecords, err := srcReader.ReadRecords(ctx, keys)
 	if err != nil {
 		tr.Mismatches = append(tr.Mismatches, MismatchDetail{
 			Category: MismatchValueDiff,
@@ -32,7 +36,7 @@ func compareRecords(
 		return
 	}
 
-	dstRecords, err := dstReader.ReadRecords(context.Background(), keys)
+	dstRecords, err := dstReader.ReadRecords(ctx, keys)
 	if err != nil {
 		tr.Mismatches = append(tr.Mismatches, MismatchDetail{
 			Category: MismatchValueDiff,
@@ -141,8 +145,11 @@ func compareFields(src, dst map[string]any) []FieldDiff {
 			continue
 		}
 
-		if !valuesEqual(srcVal, dstVal) {
-			diffs = append(diffs, FieldDiff{Field: field, SourceValue: srcVal, DestValue: dstVal})
+		normSrc := normalizeComparableValue(srcVal)
+		normDst := normalizeComparableValue(dstVal)
+
+		if !valuesEqual(normSrc, normDst) {
+			diffs = append(diffs, FieldDiff{Field: field, SourceValue: normSrc, DestValue: normDst})
 		}
 	}
 
@@ -165,6 +172,18 @@ func valuesEqual(a, b any) bool {
 		return true
 	}
 
+	aTime, aIsTime := toTimeValue(a)
+	bTime, bIsTime := toTimeValue(b)
+	if aIsTime && bIsTime {
+		return aTime.Equal(bTime) || aTime.Truncate(time.Second).Equal(bTime.Truncate(time.Second))
+	}
+
+	aDec, aIsDec := toBigRat(a)
+	bDec, bIsDec := toBigRat(b)
+	if aIsDec && bIsDec {
+		return aDec.Cmp(bDec) == 0
+	}
+
 	aFloat, aIsFloat := toFloat64(a)
 	bFloat, bIsFloat := toFloat64(b)
 	if aIsFloat && bIsFloat {
@@ -176,16 +195,147 @@ func valuesEqual(a, b any) bool {
 	return aStr == bStr
 }
 
+func toBigRat(v any) (*big.Rat, bool) {
+	switch n := v.(type) {
+	case float64:
+		r := new(big.Rat)
+		if _, ok := r.SetString(strconv.FormatFloat(n, 'f', -1, 64)); ok {
+			return r, true
+		}
+	case float32:
+		r := new(big.Rat)
+		if _, ok := r.SetString(strconv.FormatFloat(float64(n), 'f', -1, 32)); ok {
+			return r, true
+		}
+	case int:
+		return new(big.Rat).SetInt64(int64(n)), true
+	case int8:
+		return new(big.Rat).SetInt64(int64(n)), true
+	case int16:
+		return new(big.Rat).SetInt64(int64(n)), true
+	case int32:
+		return new(big.Rat).SetInt64(int64(n)), true
+	case int64:
+		return new(big.Rat).SetInt64(n), true
+	case uint:
+		return new(big.Rat).SetUint64(uint64(n)), true
+	case uint8:
+		return new(big.Rat).SetUint64(uint64(n)), true
+	case uint16:
+		return new(big.Rat).SetUint64(uint64(n)), true
+	case uint32:
+		return new(big.Rat).SetUint64(uint64(n)), true
+	case uint64:
+		return new(big.Rat).SetUint64(n), true
+	case string:
+		r := new(big.Rat)
+		if _, ok := r.SetString(n); ok {
+			return r, true
+		}
+	case []byte:
+		r := new(big.Rat)
+		if _, ok := r.SetString(string(n)); ok {
+			return r, true
+		}
+	case json.Number:
+		r := new(big.Rat)
+		if _, ok := r.SetString(n.String()); ok {
+			return r, true
+		}
+	case pgtype.Numeric:
+		norm := normalizePGNumeric(n)
+		if s, ok := norm.(string); ok {
+			r := new(big.Rat)
+			if _, ok := r.SetString(s); ok {
+				return r, true
+			}
+		}
+	}
+	return nil, false
+}
+
 func normalizeComparableValue(v any) any {
 	switch x := v.(type) {
 	case bson.ObjectID:
 		return x.Hex()
 	case []byte:
 		return string(x)
+	case pgtype.Numeric:
+		return normalizePGNumeric(x)
 	case fmt.Stringer:
 		return x.String()
 	default:
 		return v
+	}
+}
+
+func normalizePGNumeric(n pgtype.Numeric) any {
+	if !n.Valid {
+		return nil
+	}
+	if n.NaN {
+		return "NaN"
+	}
+	if n.InfinityModifier == pgtype.Infinity {
+		return "Infinity"
+	}
+	if n.InfinityModifier == pgtype.NegativeInfinity {
+		return "-Infinity"
+	}
+
+	if n.Exp >= 0 {
+		intVal := new(big.Int).Set(n.Int)
+		if n.Exp > 0 {
+			pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n.Exp)), nil)
+			intVal.Mul(intVal, pow)
+		}
+		return intVal.String()
+	}
+
+	abs := new(big.Int).Set(n.Int)
+	neg := abs.Sign() < 0
+	if neg {
+		abs.Abs(abs)
+	}
+	str := abs.String()
+	scale := int(-n.Exp)
+	if len(str) <= scale {
+		str = strings.Repeat("0", scale-len(str)+1) + str
+	}
+	idx := len(str) - scale
+	str = str[:idx] + "." + str[idx:]
+	str = strings.TrimRight(str, "0")
+	str = strings.TrimRight(str, ".")
+	if str == "" {
+		str = "0"
+	}
+	if neg && str != "0" {
+		str = "-" + str
+	}
+	return str
+}
+
+func toTimeValue(v any) (time.Time, bool) {
+	switch x := v.(type) {
+	case time.Time:
+		return x.UTC(), true
+	case string:
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02 15:04:05.999999 -0700 MST",
+			"2006-01-02 15:04:05.999999",
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05.999999",
+			"2006-01-02T15:04:05",
+		} {
+			if t, err := time.Parse(layout, x); err == nil {
+				return t.UTC(), true
+			}
+		}
+		return time.Time{}, false
+	default:
+		return time.Time{}, false
 	}
 }
 
@@ -218,6 +368,9 @@ func toFloat64(v any) (float64, bool) {
 		return n, true
 	case string:
 		f, err := strconv.ParseFloat(n, 64)
+		return f, err == nil
+	case json.Number:
+		f, err := n.Float64()
 		return f, err == nil
 	case pgtype.Numeric:
 		f, err := n.Float64Value()

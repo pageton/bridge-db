@@ -10,13 +10,13 @@ import (
 // compareChecksums compares row-level checksums between source and destination
 // and records mismatches into the TableResult.
 func compareChecksums(
-	_ context.Context,
+	ctx context.Context,
 	srcChecksum, dstChecksum provider.Checksummer,
 	table string,
 	keys []string,
 	tr *TableResult,
 ) {
-	srcHashes, err := srcChecksum.ComputeChecksums(context.Background(), keys)
+	srcHashes, err := srcChecksum.ComputeChecksums(ctx, keys)
 	if err != nil {
 		tr.Mismatches = append(tr.Mismatches, MismatchDetail{
 			Category: MismatchChecksumDiff,
@@ -27,7 +27,7 @@ func compareChecksums(
 		return
 	}
 
-	dstHashes, err := dstChecksum.ComputeChecksums(context.Background(), keys)
+	dstHashes, err := dstChecksum.ComputeChecksums(ctx, keys)
 	if err != nil {
 		tr.Mismatches = append(tr.Mismatches, MismatchDetail{
 			Category: MismatchChecksumDiff,
