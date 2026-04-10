@@ -101,12 +101,91 @@ type cockroachDBTypeMapper struct {
 func (m cockroachDBTypeMapper) MapType(colType string) (string, bool) {
 	upper := strings.ToUpper(colType)
 	switch m.dst {
+	case "cockroachdb":
+		switch m.src {
+		case "mysql":
+			return MySQLToPostgresTypeMapper{}.MapType(colType)
+		case "mariadb":
+			return mariadbToPostgresType(upper)
+		case "postgres":
+			return postgresToCockroachType(upper)
+		default:
+			return "", false
+		}
+	case "postgres":
+		return cockroachDBToPostgresType(upper)
 	case "mysql", "mariadb":
 		return cockroachDBToMySQLType(upper)
 	case "sqlite":
 		return cockroachDBToSQLiteType(upper)
 	case "redis", "mongodb":
 		return "", false
+	default:
+		return "", false
+	}
+}
+
+func cockroachDBToPostgresType(upper string) (string, bool) {
+	switch {
+	case strings.HasPrefix(upper, "TIMESTAMP WITH TIME ZONE"):
+		return "TIMESTAMPTZ", true
+	case strings.HasPrefix(upper, "TIMESTAMP WITHOUT TIME ZONE"):
+		return "TIMESTAMP", true
+	case strings.HasPrefix(upper, "TIMESTAMP"):
+		return "TIMESTAMP", true
+	case strings.HasPrefix(upper, "CHARACTER VARYING"):
+		return "VARCHAR", true
+	case strings.HasPrefix(upper, "CHARACTER"):
+		return "CHAR", true
+	case strings.HasPrefix(upper, "DECIMAL"):
+		return "DECIMAL", true
+	case strings.HasPrefix(upper, "NUMERIC"):
+		return "NUMERIC", true
+	}
+
+	typeMap := map[string]string{
+		"SMALLINT": "SMALLINT",
+		"INTEGER":  "INTEGER",
+		"INT":      "INTEGER",
+		"BIGINT":   "BIGINT",
+		"REAL":     "REAL",
+		"DOUBLE":   "DOUBLE PRECISION",
+		"BOOLEAN":  "BOOLEAN",
+		"BOOL":     "BOOLEAN",
+		"DATE":     "DATE",
+		"TIME":     "TIME",
+		"TEXT":     "TEXT",
+		"BYTEA":    "BYTEA",
+		"JSON":     "JSONB",
+		"JSONB":    "JSONB",
+		"UUID":     "UUID",
+	}
+
+	if mapped, ok := typeMap[upper]; ok {
+		return mapped, true
+	}
+
+	return "", false
+}
+
+func postgresToCockroachType(upper string) (string, bool) {
+	switch {
+	case strings.HasPrefix(upper, "BIGSERIAL"):
+		return "BIGINT", true
+	case strings.HasPrefix(upper, "SMALLSERIAL"):
+		return "SMALLINT", true
+	case strings.HasPrefix(upper, "SERIAL"):
+		return "INT", true
+	case strings.HasPrefix(upper, "CHARACTER VARYING"):
+		return "STRING", true
+	case strings.HasPrefix(upper, "CHARACTER"):
+		return "STRING", true
+	case strings.HasPrefix(upper, "TIMESTAMP WITH TIME ZONE"):
+		return "TIMESTAMPTZ", true
+	case strings.HasPrefix(upper, "TIMESTAMP WITHOUT TIME ZONE"):
+		return "TIMESTAMP", true
+	case strings.HasPrefix(upper, "JSONB"):
+		return "JSONB", true
 	default:
 		return "", false
 	}

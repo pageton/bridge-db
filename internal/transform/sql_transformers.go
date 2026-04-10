@@ -236,17 +236,29 @@ func (m PostgresToMySQLTypeMapper) MapType(postgresType string) (string, bool) {
 		return "DATETIME", true
 	case strings.HasPrefix(normalized, "TIMESTAMP"):
 		return "DATETIME", true
+	case strings.HasPrefix(normalized, "VARCHAR("):
+		return normalized, true
 	case strings.HasPrefix(normalized, "CHARACTER VARYING"):
 		parts := strings.Fields(postgresType)
 		if len(parts) >= 3 {
 			return "VARCHAR" + parts[2], true
 		}
 		return "VARCHAR(255)", true
+	case strings.HasPrefix(normalized, "CHAR("):
+		return normalized, true
 	case strings.HasPrefix(normalized, "CHARACTER"):
 		return "CHAR(255)", true
 	case strings.HasPrefix(normalized, "DOUBLE PRECISION"):
 		return "DOUBLE", true
 	case strings.HasPrefix(normalized, "NUMERIC"):
+		if idx := strings.Index(normalized, "("); idx != -1 {
+			return "DECIMAL" + normalized[idx:], true
+		}
+		return "DECIMAL", true
+	case strings.HasPrefix(normalized, "DECIMAL"):
+		if idx := strings.Index(normalized, "("); idx != -1 {
+			return "DECIMAL" + normalized[idx:], true
+		}
 		return "DECIMAL", true
 	}
 
