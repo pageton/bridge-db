@@ -36,6 +36,50 @@ const (
 // Migration unit
 // ---------------------------------------------------------------------------
 
+// RelationHint describes a foreign key relationship for write ordering.
+// Populated only for SQL rows that have foreign key constraints.
+type RelationHint struct {
+	// Table is the referenced (parent) table name.
+	Table string
+
+	// Schema is the referenced table's schema (empty for providers
+	// that do not use schemas, e.g. MySQL, SQLite).
+	Schema string
+
+	// Columns lists the FK column names in this (child) table.
+	Columns []string
+
+	// OnDelete is the ON DELETE action: "CASCADE", "SET NULL",
+	// "NO ACTION", "RESTRICT". Empty if not applicable.
+	OnDelete string
+}
+
+// UnitMeta carries typed metadata extracted from the provider-specific
+// envelope in Data. Scanners populate it alongside Data so that consumers
+// can access metadata without deserializing Data.
+//
+// Fields that do not apply to a given provider are left at their zero value.
+type UnitMeta struct {
+	// Schema is the database schema name. "public" for PostgreSQL and
+	// CockroachDB; empty for MySQL, SQLite, MariaDB, MSSQL, MongoDB, Redis.
+	Schema string
+
+	// PrimaryKey maps primary-key column names to their values.
+	// nil for Redis and MongoDB (which use Key instead).
+	PrimaryKey map[string]any
+
+	// ColumnTypes maps column names to their database type names
+	// (e.g. "INT", "VARCHAR(255)"). nil for NoSQL providers.
+	ColumnTypes map[string]string
+
+	// TTL is the time-to-live in seconds. Non-zero only for Redis keys.
+	TTL int64
+
+	// Relations lists foreign key hints for write ordering.
+	// nil when there are no foreign key relationships or for NoSQL providers.
+	Relations []RelationHint
+}
+
 // MigrationUnit is the fundamental unit of data moved through the pipeline.
 // For Redis it represents a single key (with its type, value and TTL).
 // For MongoDB it represents a single document.
@@ -53,13 +97,14 @@ type MigrationUnit struct {
 
 	// Data holds the serialised value. Encoding depends on DataType:
 	//   Redis    – JSON envelope with type-specific fields
-	//   MongoDB  – raw BSON bytes
-	//   SQL      – JSON map of column→value
+	//   MongoDB  – JSON envelope with collection, document_id, document
+	//   SQL      – JSON envelope with table, schema, primary_key, data, column_types
 	Data []byte
 
-	// Metadata carries optional provider-specific information (e.g. Redis TTL,
-	// MongoDB _id type, SQL column types).
-	Metadata map[string]any
+	// Meta carries typed metadata extracted from the envelope in Data.
+	// Scanners populate it alongside Data so that consumers can access
+	// metadata without deserializing Data.
+	Meta UnitMeta
 
 	// Size is the approximate byte size of Data (for metrics and batching).
 	Size int64
@@ -172,6 +217,19 @@ type ProgressStats struct {
 	TablesCompleted  int
 	TablesTotal      int
 	ErrorCount       int
+	CurrentTable     string // table being actively processed
+}
+
+// TableMetrics holds per-table statistics for a migration.
+type TableMetrics struct {
+	Table      string        `json:"table"`
+	Scanned    int64         `json:"scanned"`
+	Written    int64         `json:"written"`
+	Failed     int64         `json:"failed"`
+	Skipped    int64         `json:"skipped"`
+	Bytes      int64         `json:"bytes"`
+	Duration   time.Duration `json:"duration"`
+	BatchCount int           `json:"batch_count"`
 }
 
 // MigrationSummary is the final report after a migration completes.
@@ -188,6 +246,9 @@ type MigrationSummary struct {
 	VerificationOK   bool
 	VerificationErrs []VerificationError
 	Errors           []error
+	TableMetrics     []TableMetrics `json:"table_metrics,omitempty"`
+	AvgThroughput    float64        `json:"avg_throughput,omitempty"` // units/sec overall
+	PeakThroughput   float64        `json:"peak_throughput,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +357,28 @@ type IndexSchema struct {
 // TypeMapper converts a column type from one database dialect to another.
 type TypeMapper interface {
 	MapType(colType string) (string, bool)
+}
+
+// ---------------------------------------------------------------------------
+// Cross-verification interfaces (optional)
+// ---------------------------------------------------------------------------
+
+// VerifyReader reads back individual records by key for value comparison.
+// Providers optionally implement this for cross-database verification.
+type VerifyReader interface {
+	ReadRecords(ctx context.Context, keys []string) (map[string]map[string]any, error)
+}
+
+// TableEnumerator lists tables/collections and their row counts.
+// Providers optionally implement this for count-based verification.
+type TableEnumerator interface {
+	EnumerateTables(ctx context.Context) (map[string]int64, error)
+}
+
+// Checksummer computes row-level hashes for efficient comparison.
+// Providers optionally implement this for checksum-based verification.
+type Checksummer interface {
+	ComputeChecksums(ctx context.Context, keys []string) (map[string]string, error)
 }
 
 // ---------------------------------------------------------------------------
