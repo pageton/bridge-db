@@ -14,7 +14,10 @@ import (
 // It can inspect source schemas and create them on the destination.
 type mysqlSchemaMigrator struct {
 	db  *sql.DB
-	log interface{ Info(msg string, args ...any) }
+	log interface {
+		Warn(msg string, args ...any)
+		Debug(msg string, args ...any)
+	}
 }
 
 func newMySQLSchemaMigrator(db *sql.DB) *mysqlSchemaMigrator {
@@ -46,14 +49,14 @@ func (m *mysqlSchemaMigrator) Inspect(ctx context.Context) (*provider.Schema, er
 		// Get columns for this table
 		columns, err := m.getTableColumns(ctx, tableName)
 		if err != nil {
-			m.log.Info("failed to get columns", "table", tableName, "error", err)
+			m.log.Debug("failed to get columns", "table", tableName, "error", err)
 			continue
 		}
 
 		// Get indexes for this table
 		indexes, err := m.getTableIndexes(ctx, tableName)
 		if err != nil {
-			m.log.Info("failed to get indexes", "table", tableName, "error", err)
+			m.log.Debug("failed to get indexes", "table", tableName, "error", err)
 			continue
 		}
 
@@ -143,24 +146,40 @@ func (m *mysqlSchemaMigrator) getTableIndexes(ctx context.Context, table string)
 	}
 	defer func() { _ = rows.Close() }()
 
+	columnNames, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	if len(columnNames) < 5 {
+		return nil, fmt.Errorf("show index returned too few columns: %d", len(columnNames))
+	}
+
 	// Group by index name
 	indexMap := make(map[string]*provider.IndexSchema)
 
 	for rows.Next() {
-		var nonUnique int
-		var indexName, columnName sql.NullString
-		var seqInIndex int
-		var collation, cardinality, subPart, packed, nullVal sql.NullString
-		var indexType, comment, indexComment, visible, expression sql.NullString
+		values := make([]sql.NullString, len(columnNames))
+		scanArgs := make([]any, 0, len(values))
+		for i := range values {
+			scanArgs = append(scanArgs, &values[i])
+		}
 
-		if err := rows.Scan(
-			new(sql.NullString), &nonUnique, &indexName, &seqInIndex, &columnName,
-			&collation, &cardinality, &subPart, &packed, &nullVal,
-			&indexType, &comment, &indexComment, &visible, &expression,
-		); err != nil {
-			m.log.Info("scan index row failed", "error", err)
+		if err := rows.Scan(scanArgs...); err != nil {
+			m.log.Warn("scan index row failed", "error", err)
 			continue
 		}
+
+		var nonUnique int
+		if !values[1].Valid {
+			continue
+		}
+		if _, err := fmt.Sscanf(values[1].String, "%d", &nonUnique); err != nil {
+			m.log.Warn("parse index uniqueness failed", "table", table, "value", values[1].String, "error", err)
+			continue
+		}
+
+		indexName := values[2]
+		columnName := values[4]
 
 		if !indexName.Valid || !columnName.Valid {
 			continue
@@ -265,11 +284,11 @@ func (m *mysqlSchemaMigrator) createTable(ctx context.Context, table provider.Ta
 		}
 
 		if err := m.createIndex(ctx, table.Name, idx); err != nil {
-			m.log.Info("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
+			m.log.Debug("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
 		}
 	}
 
-	m.log.Info("created table", "table", table.Name)
+	m.log.Debug("created table", "table", table.Name)
 	return nil
 }
 

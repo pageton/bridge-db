@@ -28,7 +28,9 @@ type mongoDBScanner struct {
 	cursor          *mongo.Cursor
 	done            bool
 	tablesCompleted map[string]bool // collections to skip on resume
-	log             interface{ Info(msg string, args ...any) }
+	log             interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 func newMongoDBScanner(database *mongo.Database, opts provider.ScanOptions) *mongoDBScanner {
@@ -44,7 +46,7 @@ func newMongoDBScanner(database *mongo.Database, opts provider.ScanOptions) *mon
 	if len(opts.ResumeToken) > 0 {
 		if stats, err := provider.UnmarshalScanToken(opts.ResumeToken); err == nil {
 			s.stats = stats
-			s.log.Info("resuming from checkpoint",
+			s.log.Debug("resuming from checkpoint",
 				"collections_done", stats.TablesDone,
 				"collections_total", stats.TablesTotal,
 				"docs_scanned", stats.TotalScanned,
@@ -94,7 +96,7 @@ func (s *mongoDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit, er
 		if s.cursor != nil && s.cursor.Next(ctx) {
 			unit, err := s.readDocument(s.collections[s.currentColl], s.cursor)
 			if err != nil {
-				s.log.Info("failed to read document, skipping",
+				s.log.Debug("failed to read document, skipping",
 					"collection", s.collections[s.currentColl],
 					"error", err)
 				continue
@@ -108,7 +110,7 @@ func (s *mongoDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit, er
 		// Check for cursor error
 		if s.cursor != nil {
 			if err := s.cursor.Err(); err != nil {
-				s.log.Info("cursor error", "collection", s.collections[s.currentColl], "error", err)
+				s.log.Debug("cursor error", "collection", s.collections[s.currentColl], "error", err)
 			}
 			_ = s.cursor.Close(ctx)
 			s.cursor = nil
@@ -124,14 +126,14 @@ func (s *mongoDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit, er
 
 		// Open cursor for next collection
 		collName := s.collections[s.currentColl]
-		s.log.Info("scanning collection", "collection", collName)
+		s.log.Debug("scanning collection", "collection", collName)
 
 		// Build find options
 		findOpts := options.Find().SetBatchSize(int32(batchSize))
 
 		cursor, err := s.database.Collection(collName).Find(ctx, bson.M{}, findOpts)
 		if err != nil {
-			s.log.Info("failed to open cursor for collection", "collection", collName, "error", err)
+			s.log.Debug("failed to open cursor for collection", "collection", collName, "error", err)
 			s.currentColl++
 			s.stats.TablesDone++
 			continue
@@ -149,6 +151,16 @@ func (s *mongoDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit, er
 // Stats returns current scan statistics.
 func (s *mongoDBScanner) Stats() provider.ScanStats {
 	return s.stats
+}
+
+func (s *mongoDBScanner) Close() error {
+	if s.cursor != nil {
+		err := s.cursor.Close(context.Background())
+		s.cursor = nil
+		s.done = true
+		return err
+	}
+	return nil
 }
 
 // listCollections enumerates all collections in the database.
@@ -191,7 +203,7 @@ func (s *mongoDBScanner) listCollections(ctx context.Context) error {
 		}
 	}
 
-	s.log.Info("found collections", "count", len(s.collections))
+	s.log.Debug("found collections", "count", len(s.collections))
 
 	return nil
 }

@@ -143,15 +143,22 @@ func TestFormatDuration(t *testing.T) {
 		input time.Duration
 		want  string
 	}{
+		{0, "<1µs"},
+		{500 * time.Nanosecond, "<1µs"},
+		{50 * time.Microsecond, "50µs"},
+		{800 * time.Microsecond, "800µs"},
+		{5 * time.Millisecond, "5.0ms"},
+		{50 * time.Millisecond, "50.0ms"},
+		{150 * time.Millisecond, "150ms"},
 		{30 * time.Second, "30s"},
+		{1500 * time.Millisecond, "1.5s"},
 		{90 * time.Second, "1m30s"},
 		{3700 * time.Second, "1h1m"},
-		{0, "0s"},
 	}
 	for _, tt := range tests {
-		got := formatDuration(tt.input)
+		got := util.FormatDuration(tt.input)
 		if got != tt.want {
-			t.Errorf("formatDuration(%v) = %q, want %q", tt.input, got, tt.want)
+			t.Errorf("FormatDuration(%v) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
 }
@@ -166,12 +173,44 @@ func TestNopReporter(t *testing.T) {
 	r.OnProgress(provider.ProgressStats{})
 }
 
-func TestConsoleReporter_OnPhaseChange(t *testing.T) {
+func TestConsoleReporter_OnPhaseStart(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewConsoleReporterWith(&buf)
-	r.OnPhaseChange(provider.PhaseScanning)
-	if !strings.Contains(buf.String(), "SCANNING") {
-		t.Errorf("output = %q, should contain SCANNING", buf.String())
+	r.OnPhaseStart(provider.PhaseDesc{
+		Phase:       provider.PhaseScanning,
+		Step:        6,
+		TotalSteps:  8,
+		Description: "Transferring data",
+	})
+	output := buf.String()
+	if !strings.Contains(output, "[6/8]") {
+		t.Errorf("output should contain [6/8], got: %q", output)
+	}
+	if !strings.Contains(output, "Transferring data") {
+		t.Errorf("output should contain description, got: %q", output)
+	}
+}
+
+func TestConsoleReporter_OnPhaseDone_Skipped(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewConsoleReporterWith(&buf)
+	r.OnPhaseDone(provider.PhaseDesc{Phase: provider.PhaseSchemaMigration, Step: 4, TotalSteps: 8}, 0, provider.ErrPhaseSkipped)
+	output := buf.String()
+	if !strings.Contains(output, "skipped") {
+		t.Errorf("output should contain 'skipped', got: %q", output)
+	}
+}
+
+func TestConsoleReporter_OnPhaseDone_Failed(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewConsoleReporterWith(&buf)
+	r.OnPhaseDone(provider.PhaseDesc{Phase: provider.PhaseConnect, Step: 3, TotalSteps: 8}, 2*time.Second, errors.New("connection refused"))
+	output := buf.String()
+	if !strings.Contains(output, "FAILED") {
+		t.Errorf("output should contain 'FAILED', got: %q", output)
+	}
+	if !strings.Contains(output, "connection refused") {
+		t.Errorf("output should contain error message, got: %q", output)
 	}
 }
 
@@ -187,11 +226,11 @@ func TestConsoleReporter_OnMigrationComplete(t *testing.T) {
 		VerificationOK: true,
 	})
 	output := buf.String()
-	if !strings.Contains(output, "98") {
+	if !strings.Contains(output, "completed successfully") {
 		t.Errorf("output should contain written count, got: %q", output)
 	}
-	if !strings.Contains(output, "PASSED") {
-		t.Errorf("output should contain PASSED, got: %q", output)
+	if !strings.Contains(output, "Migration completed") {
+		t.Errorf("output should contain 'Migration complete', got: %q", output)
 	}
 }
 

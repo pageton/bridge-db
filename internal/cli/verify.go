@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/signal"
 	"syscall"
 
@@ -104,6 +103,10 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
+
+	// Initialize logger before any provider work.
+	initLogger(cfg.Logging.Level, cfg.Logging.JSON)
+
 	if err := config.Validate(cfg); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
@@ -173,7 +176,7 @@ func runVerify(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("dest ping: %w", err)
 	}
 
-	log.Info("connected to both databases")
+	log.Debug("connected to both databases")
 
 	// Build verification options
 	opts := verifypkg.DefaultOptions()
@@ -207,7 +210,7 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	}
 
 	if !report.Passed() {
-		os.Exit(1)
+		return fmt.Errorf("verification failed: %d table(s) did not pass", report.FailCount)
 	}
 	return nil
 }

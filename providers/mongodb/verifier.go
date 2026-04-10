@@ -17,7 +17,10 @@ import (
 // It verifies document counts per collection and performs sample-based comparison.
 type mongoDBVerifier struct {
 	database *mongo.Database
-	log      interface{ Info(msg string, args ...any) }
+	log      interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
 }
 
 func newMongoDBVerifier(database *mongo.Database) *mongoDBVerifier {

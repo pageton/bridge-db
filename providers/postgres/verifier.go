@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/bytedance/sonic"
@@ -17,7 +18,10 @@ import (
 // It verifies row counts per table and performs sample-based comparison.
 type postgresVerifier struct {
 	pool *pgxpool.Pool
-	log  interface{ Info(msg string, args ...any) }
+	log  interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
 }
 
 func newPostgresVerifier(pool *pgxpool.Pool) *postgresVerifier {
@@ -167,11 +171,24 @@ func parseRowKey(key string) (schema, table string, pk map[string]any, err error
 			return "", "", nil, fmt.Errorf("invalid primary key JSON: %w", err)
 		}
 	} else {
-		// Single column key - we need to find the column name
-		// For now, assume it's the first column of the primary key
-		// In a real implementation, we'd need to query the table schema
-		pk = map[string]any{"id": pkPart}
+		pk = map[string]any{"id": parsePrimaryKeyValue(pkPart)}
 	}
 
 	return schema, table, pk, nil
+}
+
+func parsePrimaryKeyValue(v string) any {
+	if i, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return i
+	}
+	if u, err := strconv.ParseUint(v, 10, 64); err == nil {
+		return u
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil {
+		return f
+	}
+	if b, err := strconv.ParseBool(v); err == nil {
+		return b
+	}
+	return v
 }

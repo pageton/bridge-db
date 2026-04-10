@@ -20,7 +20,10 @@ type mssqlWriter struct {
 	failed  int64
 	skipped int64
 	bytes   int64
-	log     interface{ Info(msg string, args ...any) }
+	log     interface {
+		Info(msg string, args ...any)
+		Debug(msg string, args ...any)
+	}
 }
 
 const (
@@ -53,7 +56,7 @@ func (w *mssqlWriter) Write(ctx context.Context, units []provider.MigrationUnit)
 		row, err := decodeMSSQLRow(unit.Data)
 		if err != nil {
 			w.failed++
-			w.log.Info("failed to decode row", "key", unit.Key, "error", err)
+			w.log.Debug("failed to decode row", "key", unit.Key, "error", err)
 			continue
 		}
 		tableRows[row.Table] = append(tableRows[row.Table], *row)
@@ -64,7 +67,7 @@ func (w *mssqlWriter) Write(ctx context.Context, units []provider.MigrationUnit)
 
 	for table, rows := range tableRows {
 		if err := w.writeTable(ctx, table, rows, &failedKeys, &errors); err != nil {
-			w.log.Info("failed to write table", "table", table, "error", err)
+			w.log.Debug("failed to write table", "table", table, "error", err)
 		}
 	}
 

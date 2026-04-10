@@ -25,7 +25,11 @@ type mongoDBWriter struct {
 	failed   int64
 	skipped  int64
 	bytes    int64
-	log      interface{ Info(msg string, args ...any) }
+	log      interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Debug(msg string, args ...any)
+	}
 }
 
 func newMongoDBWriter(database *mongo.Database, opts provider.WriteOptions) *mongoDBWriter {
@@ -58,7 +62,7 @@ func (w *mongoDBWriter) Write(ctx context.Context, units []provider.MigrationUni
 		doc, err := decodeMongoDocument(unit.Data)
 		if err != nil {
 			w.failed++
-			w.log.Info("failed to decode document", "key", unit.Key, "error", err)
+			w.log.Debug("failed to decode document", "key", unit.Key, "error", err)
 			continue
 		}
 
@@ -71,7 +75,7 @@ func (w *mongoDBWriter) Write(ctx context.Context, units []provider.MigrationUni
 	// Write each collection's documents
 	for collection, docs := range collectionDocs {
 		if err := w.writeCollection(ctx, collection, docs, &failedKeys, &errors); err != nil {
-			w.log.Info("failed to write collection", "collection", collection, "error", err)
+			w.log.Debug("failed to write collection", "collection", collection, "error", err)
 		}
 	}
 
@@ -142,7 +146,7 @@ func (w *mongoDBWriter) writeWithUpsert(ctx context.Context, coll *mongo.Collect
 	result, err := coll.BulkWrite(ctx, writeModels, bulkOpts)
 	if err != nil {
 		w.failed += int64(len(writeModels))
-		w.log.Info("bulk write failed", "collection", coll.Name(), "error", err)
+		w.log.Warn("bulk write failed", "collection", coll.Name(), "error", err)
 		return err
 	}
 

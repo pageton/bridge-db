@@ -579,7 +579,11 @@ type statsScanner struct {
 	stats provider.ScanStats
 }
 
+func (s *noopScanner) Close() error { return nil }
+
 func (s *statsScanner) Stats() provider.ScanStats { return s.stats }
+
+func (s *statsScanner) Close() error { return nil }
 
 // TestCheckpointSave_OnlyCompletedTables verifies that saveCheckpoint only
 // includes truly completed tables (where scanner.TablesDone was incremented)

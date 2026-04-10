@@ -27,7 +27,9 @@ type postgresScanner struct {
 	pkColumns       []string
 	done            bool
 	tablesCompleted map[string]bool // tables to skip on resume
-	log             interface{ Info(msg string, args ...any) }
+	log             interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 // tableInfo holds information about a table to scan.
@@ -58,7 +60,7 @@ func newPostgresScanner(pool *pgxpool.Pool, opts provider.ScanOptions) *postgres
 	if len(opts.ResumeToken) > 0 {
 		if stats, err := provider.UnmarshalScanToken(opts.ResumeToken); err == nil {
 			s.stats = stats
-			s.log.Info("resuming from checkpoint",
+			s.log.Debug("resuming from checkpoint",
 				"tables_done", stats.TablesDone,
 				"tables_total", stats.TablesTotal,
 				"rows_scanned", stats.TotalScanned,
@@ -108,7 +110,7 @@ func (s *postgresScanner) Next(ctx context.Context) ([]provider.MigrationUnit, e
 		if s.rows != nil && s.rows.Next() {
 			unit, err := s.readRow(ctx)
 			if err != nil {
-				s.log.Info("failed to read row, skipping",
+				s.log.Debug("failed to read row, skipping",
 					"table", s.tables[s.currentTable].Name,
 					"error", err)
 				continue
@@ -122,7 +124,7 @@ func (s *postgresScanner) Next(ctx context.Context) ([]provider.MigrationUnit, e
 		// Check for row error
 		if s.rows != nil {
 			if err := s.rows.Err(); err != nil {
-				s.log.Info("row error", "table", s.tables[s.currentTable].Name, "error", err)
+				s.log.Debug("row error", "table", s.tables[s.currentTable].Name, "error", err)
 			}
 			s.rows.Close()
 			s.rows = nil
@@ -138,11 +140,11 @@ func (s *postgresScanner) Next(ctx context.Context) ([]provider.MigrationUnit, e
 
 		// Open cursor for next table
 		table := s.tables[s.currentTable]
-		s.log.Info("scanning table", "schema", table.Schema, "table", table.Name)
+		s.log.Debug("scanning table", "schema", table.Schema, "table", table.Name)
 
 		// Get table columns and primary key
 		if err := s.getTableInfo(ctx, table); err != nil {
-			s.log.Info("failed to get table info", "table", table.Name, "error", err)
+			s.log.Debug("failed to get table info", "table", table.Name, "error", err)
 			s.currentTable++
 			s.stats.TablesDone++
 			continue
@@ -152,7 +154,7 @@ func (s *postgresScanner) Next(ctx context.Context) ([]provider.MigrationUnit, e
 		query := s.buildScanQuery(table)
 		rows, err := s.pool.Query(ctx, query)
 		if err != nil {
-			s.log.Info("failed to open cursor for table", "table", table.Name, "error", err)
+			s.log.Debug("failed to open cursor for table", "table", table.Name, "error", err)
 			s.currentTable++
 			s.stats.TablesDone++
 			continue
@@ -170,6 +172,15 @@ func (s *postgresScanner) Next(ctx context.Context) ([]provider.MigrationUnit, e
 // Stats returns current scan statistics.
 func (s *postgresScanner) Stats() provider.ScanStats {
 	return s.stats
+}
+
+func (s *postgresScanner) Close() error {
+	if s.rows != nil {
+		s.rows.Close()
+		s.rows = nil
+		s.done = true
+	}
+	return nil
 }
 
 // listTables enumerates all tables in the database.
@@ -216,7 +227,7 @@ func (s *postgresScanner) listTables(ctx context.Context) error {
 		}
 	}
 
-	s.log.Info("found tables", "count", len(s.tables))
+	s.log.Debug("found tables", "count", len(s.tables))
 
 	return nil
 }

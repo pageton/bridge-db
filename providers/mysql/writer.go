@@ -3,10 +3,12 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pageton/bridge-db/internal/logger"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
@@ -20,7 +22,10 @@ type mysqlWriter struct {
 	failed  int64
 	skipped int64
 	bytes   int64
-	log     interface{ Info(msg string, args ...any) }
+	log     interface {
+		Info(msg string, args ...any)
+		Debug(msg string, args ...any)
+	}
 }
 
 const (
@@ -64,7 +69,7 @@ func (w *mysqlWriter) Write(ctx context.Context, units []provider.MigrationUnit)
 		row, err := decodeMySQLRow(unit.Data)
 		if err != nil {
 			w.failed++
-			w.log.Info("failed to decode row", "key", unit.Key, "error", err)
+			w.log.Debug("failed to decode row", "key", unit.Key, "error", err)
 			continue
 		}
 
@@ -77,7 +82,7 @@ func (w *mysqlWriter) Write(ctx context.Context, units []provider.MigrationUnit)
 	// Write each table's rows
 	for table, rows := range tableRows {
 		if err := w.writeTable(ctx, table, rows, &failedKeys, &errors); err != nil {
-			w.log.Info("failed to write table", "table", table, "error", err)
+			w.log.Debug("failed to write table", "table", table, "error", err)
 		}
 	}
 
@@ -131,7 +136,7 @@ func (w *mysqlWriter) writeWithUpsert(ctx context.Context, table string, columns
 
 	updateClauses := make([]string, len(columns))
 	for i, col := range columns {
-		updateClauses[i] = fmt.Sprintf("%s = new.%s", quoteIdentifier(col), quoteIdentifier(col))
+		updateClauses[i] = fmt.Sprintf("%s = VALUES(%s)", quoteIdentifier(col), quoteIdentifier(col))
 	}
 
 	queryPrefix := fmt.Sprintf(
@@ -139,7 +144,7 @@ func (w *mysqlWriter) writeWithUpsert(ctx context.Context, table string, columns
 		quoteIdentifier(table),
 		strings.Join(quotedColumns, ", "),
 	)
-	querySuffix := fmt.Sprintf(" AS new ON DUPLICATE KEY UPDATE %s", strings.Join(updateClauses, ", "))
+	querySuffix := fmt.Sprintf(" ON DUPLICATE KEY UPDATE %s", strings.Join(updateClauses, ", "))
 
 	// Estimate per-row size for chunking.
 	rowPlaceholder := "(" + buildPlaceholders(len(columns)) + ")"
@@ -357,6 +362,19 @@ func (w *mysqlWriter) prepareValue(col string, row mysqlRow) any {
 	val := row.Data[col]
 	if val == nil {
 		return nil
+	}
+
+	switch x := val.(type) {
+	case pgtype.Numeric:
+		if x.Valid {
+			b, err := x.MarshalJSON()
+			if err == nil {
+				return string(b)
+			}
+		}
+		return nil
+	case json.Number:
+		return x.String()
 	}
 
 	colType := strings.ToLower(row.ColumnTypes[col])

@@ -13,6 +13,7 @@ import (
 
 	"github.com/pageton/bridge-db/internal/bridge"
 	"github.com/pageton/bridge-db/internal/config"
+	"github.com/pageton/bridge-db/internal/logger"
 	"github.com/pageton/bridge-db/internal/progress"
 	"github.com/pageton/bridge-db/internal/tunnel"
 	"github.com/pageton/bridge-db/internal/util"
@@ -244,6 +245,9 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
+	// Initialize logger before any pipeline work.
+	initLogger(cfg.Logging.Level, cfg.Logging.JSON)
+
 	// Pre-flight validation with actionable hints.
 	if err := preflightValidate(cfg); err != nil {
 		return err
@@ -297,6 +301,8 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create migration pipeline: %w", err)
 	}
+
+	printStartupContext(cfg, opts)
 
 	result, err := pipeline.Run(ctx)
 	if err != nil {
@@ -442,6 +448,22 @@ func readPasswordFromStdin() (string, error) {
 	return buf.String(), nil
 }
 
+// initLogger configures the structured logger from the CLI flags.
+func initLogger(level string, json bool) {
+	var l logger.Level
+	switch level {
+	case "debug":
+		l = logger.LevelDebug
+	case "warn":
+		l = logger.LevelWarn
+	case "error":
+		l = logger.LevelError
+	default:
+		l = logger.LevelInfo
+	}
+	logger.Init(l, json)
+}
+
 // warnPasswordFlags prints a deprecation warning when password values are
 // passed via CLI flags, which expose them in the process listing.
 func warnPasswordFlags(cmd *cobra.Command) {
@@ -554,9 +576,9 @@ func preflightValidate(cfg *config.MigrationConfig) error {
 
 		if migrateSchema && !provider.SupportsSchemaMigration(srcCaps, dstCaps) {
 			if !srcCaps.Schema {
-				hints = append(hints, fmt.Sprintf("Source %q does not support schema migration -- --migrate-schema will be skipped", cfg.Source.Provider))
+				fmt.Fprintf(os.Stderr, "Warning: source %q does not support schema migration -- --migrate-schema will be skipped\n", cfg.Source.Provider)
 			} else if !dstCaps.Schema {
-				hints = append(hints, fmt.Sprintf("Destination %q does not support schema migration -- --migrate-schema will be skipped", cfg.Destination.Provider))
+				fmt.Fprintf(os.Stderr, "Warning: destination %q does not support schema migration -- --migrate-schema will be skipped\n", cfg.Destination.Provider)
 			}
 		}
 	}
@@ -623,7 +645,6 @@ func printDryRunPreview(cfg *config.MigrationConfig) {
 
 	fmt.Println()
 	fmt.Println("No data will be written. Remove --dry-run to execute the migration.")
-	fmt.Println(strings.Repeat("=", 24))
 }
 
 // maskPassword replaces the password component in a database URL with ***.
@@ -638,58 +659,68 @@ func maskPassword(rawURL string) string {
 	return u.String()
 }
 
+// printStartupContext prints migration context before the phases begin.
+func printStartupContext(cfg *config.MigrationConfig, opts bridge.PipelineOptions) {
+	fmt.Printf("Migration: %s -> %s\n", cfg.Source.Provider, cfg.Destination.Provider)
+	verifyStr := "off"
+	if opts.Verify {
+		verifyStr = "on"
+	}
+	cpStr := "off"
+	if opts.CheckpointEnabled {
+		cpStr = "on"
+	}
+	fmt.Printf("  Workers: %d | Batch: %d | Verify: %s | Checkpoint: %s\n",
+		opts.WriteWorkers, opts.BatchSize, verifyStr, cpStr)
+	if opts.Resume {
+		fmt.Println("  Resuming from checkpoint")
+	}
+}
+
 // printSummary prints the migration summary to stdout.
 func printSummary(result *bridge.RunResult) {
 	fmt.Println()
-	fmt.Println("=== Migration Summary ===")
+	fmt.Println("--- Summary ---")
 	fmt.Printf("Source:      %s\n", result.SrcProvider)
 	fmt.Printf("Destination: %s\n", result.DstProvider)
-	fmt.Printf("Duration:    %s\n", result.Summary.Duration)
+	fmt.Printf("Duration:    %s\n", util.FormatDuration(result.Summary.Duration))
 
-	// Phase timing
-	if len(result.Phases) > 0 {
-		fmt.Println("\nPhases:")
-		for _, p := range result.Phases {
-			status := "OK"
-			if p.Error != nil {
-				status = fmt.Sprintf("FAILED: %v", p.Error)
-			}
-			fmt.Printf("  %-20s %s  %s\n", p.Phase, p.Duration.Round(1e6), status)
-		}
-	}
-
-	if result.Summary.TotalScanned > 0 {
+	if result.Summary.TotalWritten > 0 || result.Summary.TotalFailed > 0 {
 		fmt.Printf("\nRecords:\n")
-		fmt.Printf("  Scanned:     %d\n", result.Summary.TotalScanned)
 		fmt.Printf("  Written:     %d\n", result.Summary.TotalWritten)
-		fmt.Printf("  Failed:      %d\n", result.Summary.TotalFailed)
-		fmt.Printf("  Skipped:     %d\n", result.Summary.TotalSkipped)
-	}
-
-	if result.Summary.BytesTransferred > 0 {
-		fmt.Printf("  Transferred: %d bytes\n", result.Summary.BytesTransferred)
-	}
-
-	// Throughput
-	if result.Summary.AvgThroughput > 0 {
-		fmt.Printf("  Throughput:  %.0f avg / %.0f peak units/s\n",
-			result.Summary.AvgThroughput, result.Summary.PeakThroughput)
-	}
-
-	// Per-table breakdown
-	if len(result.Summary.TableMetrics) > 0 {
-		fmt.Println("\nPer-table breakdown:")
-		fmt.Printf("  %-30s %8s %8s %8s %10s\n", "Table", "Scanned", "Written", "Failed", "Size")
-		fmt.Println("  " + strings.Repeat("-", 70))
-		for _, tm := range result.Summary.TableMetrics {
-			fmt.Printf("  %-30s %8d %8d %8d %10s\n",
-				util.Truncate(tm.Table, 30), tm.Scanned, tm.Written, tm.Failed, util.HumanBytes(tm.Bytes))
+		if result.Summary.TotalFailed > 0 {
+			fmt.Printf("  Failed:      %d\n", result.Summary.TotalFailed)
+		}
+		if result.Summary.TotalSkipped > 0 {
+			fmt.Printf("  Skipped:     %d\n", result.Summary.TotalSkipped)
+		}
+		if result.Summary.BytesTransferred > 0 {
+			fmt.Printf("  Transferred: %s\n", util.HumanBytes(result.Summary.BytesTransferred))
+		}
+		if result.Summary.AvgThroughput > 0 {
+			fmt.Printf("  Throughput:  %.0f avg / %.0f peak records/s\n",
+				result.Summary.AvgThroughput, result.Summary.PeakThroughput)
 		}
 	}
 
-	// Verification status — use the detailed report when available.
+	// Per-table breakdown.
+	if len(result.Summary.TableMetrics) > 0 {
+		fmt.Printf("\nTables:\n")
+		fmt.Printf("  %-30s %8s %8s %10s\n", "Table", "Records", "Failed", "Size")
+		fmt.Println("  " + strings.Repeat("-", 60))
+		for _, tm := range result.Summary.TableMetrics {
+			fmt.Printf("  %-30s %8d %8d %10s\n",
+				util.Truncate(tm.Table, 30), tm.Written, tm.Failed, util.HumanBytes(tm.Bytes))
+		}
+	}
+
+	// Verification status — compact on success, detailed on failure.
 	if vr := result.VerificationReport; vr != nil {
-		fmt.Print(verifypkg.FormatTable(vr))
+		if vr.Passed() && vr.WarnCount == 0 {
+			fmt.Printf("\n%s\n", verifypkg.FormatCompact(vr))
+		} else {
+			fmt.Print(verifypkg.FormatTable(vr))
+		}
 	} else if result.Summary.VerificationOK {
 		fmt.Println("\nVerification: PASSED")
 	} else if len(result.Summary.VerificationErrs) > 0 {
@@ -706,7 +737,7 @@ func printSummary(result *bridge.RunResult) {
 		}
 	}
 
-	// Categorized error breakdown
+	// Categorized error breakdown.
 	if result.Failures != nil && result.Failures.Total > 0 {
 		fmt.Printf("\nErrors by category (%d total):\n", result.Failures.Total)
 		categories := []bridge.ErrorCategory{
@@ -728,8 +759,6 @@ func printSummary(result *bridge.RunResult) {
 			}
 		}
 	}
-
-	fmt.Println(strings.Repeat("=", 24))
 }
 
 // providerFromURLScheme extracts the provider name from a database URL scheme.

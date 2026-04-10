@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -193,10 +194,12 @@ const (
 	PhaseTunnel          MigrationPhase = "tunnel"
 	PhaseConnect         MigrationPhase = "connecting"
 	PhaseSchemaMigration MigrationPhase = "schema_migration"
+	PhasePlanning        MigrationPhase = "planning"
 	PhaseScanning        MigrationPhase = "scanning"
 	PhaseTransforming    MigrationPhase = "transforming"
 	PhaseWriting         MigrationPhase = "writing"
 	PhaseVerifying       MigrationPhase = "verifying"
+	PhaseFinalizing      MigrationPhase = "finalizing"
 	PhaseComplete        MigrationPhase = "complete"
 	PhaseError           MigrationPhase = "error"
 	PhasePaused          MigrationPhase = "paused"
@@ -295,6 +298,10 @@ type Scanner interface {
 
 	// Stats returns current scan statistics.
 	Stats() ScanStats
+
+	// Close releases any open resources (cursors, rows) held by the scanner.
+	// It is safe to call multiple times.
+	Close() error
 }
 
 // Writer persists batches of MigrationUnits to the destination.
@@ -385,6 +392,18 @@ type Checksummer interface {
 // Progress reporting
 // ---------------------------------------------------------------------------
 
+// PhaseDesc carries metadata for a numbered pipeline phase.
+type PhaseDesc struct {
+	Phase       MigrationPhase
+	Step        int // 1-based step number
+	TotalSteps  int // total number of visible phases
+	Description string
+}
+
+// ErrPhaseSkipped is passed to OnPhaseDone when a phase was intentionally
+// skipped (e.g., schema migration disabled, verification disabled).
+var ErrPhaseSkipped = errors.New("phase skipped")
+
 // ProgressReporter decouples the pipeline from the frontend layer.
 // Both the TUI and CLI implement this interface.
 type ProgressReporter interface {
@@ -393,5 +412,7 @@ type ProgressReporter interface {
 	OnMigrationComplete(summary *MigrationSummary)
 	OnError(err error, unit *MigrationUnit)
 	OnPhaseChange(phase MigrationPhase)
+	OnPhaseStart(desc PhaseDesc)
+	OnPhaseDone(desc PhaseDesc, dur time.Duration, err error)
 	OnProgress(stats ProgressStats)
 }

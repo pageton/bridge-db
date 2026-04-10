@@ -284,7 +284,7 @@ func (p *Pipeline) planWarnings(plan *MigrationPlan) {
 func logPlan(plan *MigrationPlan) {
 	log := logger.L().With("component", "pipeline", "phase", "plan")
 
-	log.Info("migration plan built",
+	log.Debug("migration plan built",
 		"source", plan.SourceProvider,
 		"destination", plan.DestProvider,
 		"cross_db", plan.CrossDB,
@@ -298,7 +298,7 @@ func logPlan(plan *MigrationPlan) {
 	)
 
 	for _, t := range plan.Tables {
-		log.Info("  table",
+		log.Debug("  table",
 			"name", t.Name,
 			"estimated_rows", t.EstimatedRows,
 		)

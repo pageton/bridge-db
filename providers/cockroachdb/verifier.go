@@ -3,6 +3,7 @@ package cockroachdb
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/bytedance/sonic"
@@ -14,7 +15,10 @@ import (
 
 type cockroachDBVerifier struct {
 	pool *pgxpool.Pool
-	log  interface{ Info(msg string, args ...any) }
+	log  interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
 }
 
 func newCockroachDBVerifier(pool *pgxpool.Pool) *cockroachDBVerifier {
@@ -148,8 +152,24 @@ func parseRowKey(key string) (schema, table string, pk map[string]any, err error
 			return "", "", nil, fmt.Errorf("invalid primary key JSON: %w", err)
 		}
 	} else {
-		pk = map[string]any{"id": pkPart}
+		pk = map[string]any{"id": parsePrimaryKeyValue(pkPart)}
 	}
 
 	return schema, table, pk, nil
+}
+
+func parsePrimaryKeyValue(v string) any {
+	if i, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return i
+	}
+	if u, err := strconv.ParseUint(v, 10, 64); err == nil {
+		return u
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil {
+		return f
+	}
+	if b, err := strconv.ParseBool(v); err == nil {
+		return b
+	}
+	return v
 }

@@ -61,7 +61,7 @@ func (p *CockroachDBProvider) Connect(ctx context.Context, srcConfig, dstConfig 
 	p.pool = pool
 
 	log := logger.L().With("provider", "cockroachdb", "role", p.role)
-	log.Info("configured cockroachdb client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
+	log.Debug("configured cockroachdb client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
 
 	return nil
 }

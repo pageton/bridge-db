@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pageton/bridge-db/internal/config"
 	"github.com/pageton/bridge-db/internal/transform"
@@ -76,6 +77,8 @@ func (s *stubScanner) Stats() provider.ScanStats {
 	defer s.mu.Unlock()
 	return provider.ScanStats{TotalScanned: int64(s.pos), TablesTotal: 1}
 }
+
+func (s *stubScanner) Close() error { return nil }
 
 type stubWriter struct {
 	p *stubProvider
@@ -486,9 +489,11 @@ func makeTestUnits(n int, table string) []provider.MigrationUnit {
 
 type noopReporter struct{}
 
-func (n noopReporter) OnBatchStart(int, int)                          {}
-func (n noopReporter) OnBatchComplete(int, *provider.BatchResult)     {}
-func (n noopReporter) OnMigrationComplete(*provider.MigrationSummary) {}
-func (n noopReporter) OnError(error, *provider.MigrationUnit)         {}
-func (n noopReporter) OnPhaseChange(provider.MigrationPhase)          {}
-func (n noopReporter) OnProgress(provider.ProgressStats)              {}
+func (n noopReporter) OnBatchStart(int, int)                                {}
+func (n noopReporter) OnBatchComplete(int, *provider.BatchResult)           {}
+func (n noopReporter) OnMigrationComplete(*provider.MigrationSummary)       {}
+func (n noopReporter) OnError(error, *provider.MigrationUnit)               {}
+func (n noopReporter) OnPhaseChange(provider.MigrationPhase)                {}
+func (n noopReporter) OnPhaseStart(provider.PhaseDesc)                      {}
+func (n noopReporter) OnPhaseDone(provider.PhaseDesc, time.Duration, error) {}
+func (n noopReporter) OnProgress(provider.ProgressStats)                    {}

@@ -66,7 +66,7 @@ func (p *SQLiteProvider) Connect(_ context.Context, srcConfig, dstConfig any) er
 	p.db = db
 
 	log := logger.L().With("provider", "sqlite", "role", p.role)
-	log.Info("configured sqlite client", "path", cfg.Path)
+	log.Debug("configured sqlite client", "path", cfg.Path)
 
 	return nil
 }

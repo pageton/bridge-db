@@ -2,6 +2,7 @@ package verify
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -154,6 +155,8 @@ func (m *mockScanner) Next(_ context.Context) ([]provider.MigrationUnit, error) 
 	return m.units, nil
 }
 func (m *mockScanner) Stats() provider.ScanStats { return provider.ScanStats{} }
+
+func (m *mockScanner) Close() error { return nil }
 
 func TestCountComparison_Matching(t *testing.T) {
 	src := &mockProvider{
@@ -548,6 +551,30 @@ func TestValuesEqual_NormalizesByteDecimalAndPgNumeric(t *testing.T) {
 	dec := pgtype.Numeric{Int: big.NewInt(99999), Exp: -2, Valid: true}
 	if !valuesEqual([]byte("999.99"), dec) {
 		t.Fatal("expected []byte decimal and pgtype.Numeric to compare equal")
+	}
+}
+
+func TestValuesEqual_NormalizesJSONNumberAndDecimalString(t *testing.T) {
+	if !valuesEqual(json.Number("999.99"), []byte("999.99")) {
+		t.Fatal("expected json.Number and []byte decimal to compare equal")
+	}
+}
+
+func TestValuesEqual_NormalizesFloatAndDecimalBytes(t *testing.T) {
+	if !valuesEqual(999.99, []byte("999.99")) {
+		t.Fatal("expected float64 and []byte decimal to compare equal")
+	}
+}
+
+func TestValuesEqual_NormalizesFloat64AndDecimalString(t *testing.T) {
+	if !valuesEqual(999.99, "999.99") {
+		t.Fatal("expected float64 and decimal string to compare equal")
+	}
+}
+
+func TestValuesEqual_NormalizesIntegerAndDecimalString(t *testing.T) {
+	if !valuesEqual(int64(1000), "1000") {
+		t.Fatal("expected integer and decimal string to compare equal")
 	}
 }
 

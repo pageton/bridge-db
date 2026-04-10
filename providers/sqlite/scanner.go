@@ -24,7 +24,9 @@ type sqliteScanner struct {
 	pkColumns       []string
 	done            bool
 	tablesCompleted map[string]bool
-	log             interface{ Info(msg string, args ...any) }
+	log             interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 type columnInfo struct {
@@ -46,7 +48,7 @@ func newSQLiteScanner(db *sql.DB, opts provider.ScanOptions) *sqliteScanner {
 	if len(opts.ResumeToken) > 0 {
 		if stats, err := provider.UnmarshalScanToken(opts.ResumeToken); err == nil {
 			s.stats = stats
-			s.log.Info("resuming from checkpoint",
+			s.log.Debug("resuming from checkpoint",
 				"tables_done", stats.TablesDone,
 				"tables_total", stats.TablesTotal,
 				"rows_scanned", stats.TotalScanned,
@@ -90,7 +92,7 @@ func (s *sqliteScanner) Next(ctx context.Context) ([]provider.MigrationUnit, err
 		if s.rows != nil && s.rows.Next() {
 			unit, err := s.readRow(ctx)
 			if err != nil {
-				s.log.Info("failed to read row, skipping",
+				s.log.Debug("failed to read row, skipping",
 					"table", s.tables[s.currentTable],
 					"error", err)
 				continue
@@ -115,10 +117,10 @@ func (s *sqliteScanner) Next(ctx context.Context) ([]provider.MigrationUnit, err
 		}
 
 		table := s.tables[s.currentTable]
-		s.log.Info("scanning table", "table", table)
+		s.log.Debug("scanning table", "table", table)
 
 		if err := s.getTableInfo(ctx, table); err != nil {
-			s.log.Info("failed to get table info", "table", table, "error", err)
+			s.log.Debug("failed to get table info", "table", table, "error", err)
 			s.currentTable++
 			s.stats.TablesDone++
 			continue
@@ -127,7 +129,7 @@ func (s *sqliteScanner) Next(ctx context.Context) ([]provider.MigrationUnit, err
 		query := s.buildScanQuery(table)
 		rows, err := s.db.QueryContext(ctx, query)
 		if err != nil {
-			s.log.Info("failed to open cursor for table", "table", table, "error", err)
+			s.log.Debug("failed to open cursor for table", "table", table, "error", err)
 			s.currentTable++
 			s.stats.TablesDone++
 			continue
@@ -144,6 +146,16 @@ func (s *sqliteScanner) Next(ctx context.Context) ([]provider.MigrationUnit, err
 
 func (s *sqliteScanner) Stats() provider.ScanStats {
 	return s.stats
+}
+
+func (s *sqliteScanner) Close() error {
+	if s.rows != nil {
+		err := s.rows.Close()
+		s.rows = nil
+		s.done = true
+		return err
+	}
+	return nil
 }
 
 func (s *sqliteScanner) listTables(ctx context.Context) error {
@@ -181,7 +193,7 @@ func (s *sqliteScanner) listTables(ctx context.Context) error {
 		}
 	}
 
-	s.log.Info("found tables", "count", len(s.tables))
+	s.log.Debug("found tables", "count", len(s.tables))
 	return nil
 }
 

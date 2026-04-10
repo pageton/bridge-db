@@ -75,7 +75,7 @@ func (cv *CrossVerifier) Verify(ctx context.Context) (*VerificationReport, error
 		return report, nil
 	}
 
-	log.Info("enumerated tables", "source_tables", len(srcCounts), "dest_tables", len(dstCounts))
+	log.Debug("enumerated tables", "source_tables", len(srcCounts), "dest_tables", len(dstCounts))
 	report.VerifiedAny = true
 
 	// Normalize counts for cross-provider table name matching while preserving
@@ -379,6 +379,7 @@ func (cv *CrossVerifier) sampleKeys(ctx context.Context, table string, n int, al
 		BatchSize:       n,
 		TablesCompleted: skip,
 	})
+	defer scanner.Close()
 
 	var keys []string
 	for len(keys) < n {
@@ -446,7 +447,7 @@ func (cv *CrossVerifier) logResult(report *VerificationReport) {
 		return
 	}
 	if report.Passed() {
-		log.Info("verification passed",
+		log.Debug("verification passed",
 			"tables", report.TotalTables,
 			"sampled", report.TotalSampled,
 			"duration", report.Duration)

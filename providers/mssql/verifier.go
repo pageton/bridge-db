@@ -16,7 +16,10 @@ import (
 
 type mssqlVerifier struct {
 	db  *sql.DB
-	log interface{ Info(msg string, args ...any) }
+	log interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
 }
 
 func newMSSQLVerifier(db *sql.DB) *mssqlVerifier {

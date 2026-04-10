@@ -59,7 +59,7 @@ func (t *SSHTunnel) Open(ctx context.Context) (string, error) {
 
 	// 2. Dial the SSH server
 	addr := fmt.Sprintf("%s:%d", t.config.Host, t.config.Port)
-	log.Info("connecting to SSH server", "address", addr)
+	log.Debug("connecting to SSH server", "address", addr)
 
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
@@ -92,7 +92,7 @@ func (t *SSHTunnel) Open(ctx context.Context) (string, error) {
 	go t.forward()
 
 	t.open = true
-	log.Info("SSH tunnel established",
+	log.Debug("SSH tunnel established",
 		"local_addr", t.localAddr,
 		"remote_addr", fmt.Sprintf("%s:%d", t.config.RemoteHost, t.config.RemotePort),
 	)
@@ -466,6 +466,6 @@ func (t *SSHTunnel) reconnect() bool {
 	// Restart keepalive for the new connection.
 	go t.keepalive()
 
-	log.Info("tunnel: reconnected successfully", "local_addr", t.localAddr)
+	log.Debug("tunnel: reconnected successfully", "local_addr", t.localAddr)
 	return true
 }

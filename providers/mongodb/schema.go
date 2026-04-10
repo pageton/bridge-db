@@ -18,7 +18,9 @@ import (
 // It can inspect source indexes and create them on the destination.
 type mongoDBSchemaMigrator struct {
 	database *mongo.Database
-	log      interface{ Info(msg string, args ...any) }
+	log      interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 func newMongoDBSchemaMigrator(database *mongo.Database) *mongoDBSchemaMigrator {
@@ -53,7 +55,7 @@ func (m *mongoDBSchemaMigrator) Inspect(ctx context.Context) (*provider.Schema, 
 		// Get indexes for this collection
 		indexes, err := m.getCollectionIndexes(ctx, name)
 		if err != nil {
-			m.log.Info("failed to get indexes", "collection", name, "error", err)
+			m.log.Debug("failed to get indexes", "collection", name, "error", err)
 			continue
 		}
 
@@ -176,7 +178,7 @@ func (m *mongoDBSchemaMigrator) createCollectionIndexes(ctx context.Context, col
 		return err
 	}
 
-	m.log.Info("created indexes", "collection", collection, "count", len(indexModels))
+	m.log.Debug("created indexes", "collection", collection, "count", len(indexModels))
 	return nil
 }
 
@@ -207,7 +209,7 @@ func (m *mongoDBSchemaMigrator) dropCollectionIndexes(ctx context.Context, colle
 	// Drop each index
 	for _, name := range indexNames {
 		if err := coll.Indexes().DropOne(ctx, name); err != nil {
-			m.log.Info("failed to drop index", "collection", collection, "index", name, "error", err)
+			m.log.Debug("failed to drop index", "collection", collection, "index", name, "error", err)
 		}
 	}
 

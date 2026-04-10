@@ -54,11 +54,14 @@ func (d *dryRunProvider) Capabilities() provider.Capabilities {
 // dryRunWriter logs writes without executing them.
 type dryRunWriter struct {
 	opts provider.WriteOptions
-	log  interface{ Info(msg string, args ...any) }
+	log  interface {
+		Debug(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
 }
 
 func (w *dryRunWriter) Write(_ context.Context, units []provider.MigrationUnit) (*provider.BatchResult, error) {
-	w.log.Info("dry-run: would write batch", "unit_count", len(units))
+	w.log.Debug("dry-run: would write batch", "unit_count", len(units))
 
 	var totalBytes int64
 	for _, u := range units {

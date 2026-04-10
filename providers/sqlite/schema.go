@@ -42,7 +42,9 @@ func sqliteSafeDefault(defaultVal string) (string, bool) {
 
 type sqliteSchemaMigrator struct {
 	db  *sql.DB
-	log interface{ Info(msg string, args ...any) }
+	log interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 func newSQLiteSchemaMigrator(db *sql.DB) *sqliteSchemaMigrator {
@@ -74,13 +76,13 @@ func (m *sqliteSchemaMigrator) Inspect(ctx context.Context) (*provider.Schema, e
 	for _, tableName := range tableNames {
 		columns, err := m.getTableColumns(ctx, tableName)
 		if err != nil {
-			m.log.Info("failed to get columns", "table", tableName, "error", err)
+			m.log.Debug("failed to get columns", "table", tableName, "error", err)
 			continue
 		}
 
 		indexes, err := m.getTableIndexes(ctx, tableName)
 		if err != nil {
-			m.log.Info("failed to get indexes", "table", tableName, "error", err)
+			m.log.Debug("failed to get indexes", "table", tableName, "error", err)
 			continue
 		}
 
@@ -287,11 +289,11 @@ func (m *sqliteSchemaMigrator) createTable(ctx context.Context, table provider.T
 		}
 
 		if err := m.createIndex(ctx, table.Name, idx); err != nil {
-			m.log.Info("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
+			m.log.Debug("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
 		}
 	}
 
-	m.log.Info("created table", "table", table.Name)
+	m.log.Debug("created table", "table", table.Name)
 	return nil
 }
 

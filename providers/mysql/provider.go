@@ -78,9 +78,9 @@ func (p *MySQLProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 
 	log := logger.L().With("provider", "mysql", "role", p.role)
 	if cfg.IsUnixSocket() {
-		log.Info("configured mysql client", "socket", cfg.Host, "database", cfg.Database)
+		log.Debug("configured mysql client", "socket", cfg.Host, "database", cfg.Database)
 	} else {
-		log.Info("configured mysql client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
+		log.Debug("configured mysql client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
 	}
 
 	return nil

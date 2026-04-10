@@ -23,7 +23,7 @@ type redisWriter struct {
 	failed  int64
 	skipped int64
 	bytes   int64
-	log     interface{ Info(msg string, args ...any) }
+	log     interface{ Debug(msg string, args ...any) }
 }
 
 func newRedisWriter(client *redis.Client, opts provider.WriteOptions) *redisWriter {
@@ -97,7 +97,7 @@ func (w *redisWriter) Write(ctx context.Context, units []provider.MigrationUnit)
 	if len(cmds) > 0 {
 		if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 			// Pipeline errors are tricky — individual commands may have failed
-			w.log.Info("pipeline had errors", "error", err)
+			w.log.Debug("pipeline had errors", "error", err)
 		}
 	}
 

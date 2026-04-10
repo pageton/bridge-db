@@ -132,9 +132,13 @@ func (bw *batchWriter) retryIndividual(
 			if key == "" {
 				key = fmt.Sprintf("batch_%d_unit", bw.batchID)
 			}
+			unitErr := err
+			if unitErr == nil {
+				unitErr = fmt.Errorf("write returned 0 units")
+			}
 			out.unitErrors = append(out.unitErrors, unitError{
 				key: key,
-				err: err,
+				err: unitErr,
 			})
 			continue
 		}
@@ -154,7 +158,7 @@ func (bw *batchWriter) retryIndividual(
 	}
 
 	if recovered > 0 {
-		log.Info("recovered failed units via individual retry",
+		log.Debug("recovered failed units via individual retry",
 			"recovered", recovered,
 			"attempted", len(units),
 		)

@@ -24,7 +24,9 @@ type cockroachDBScanner struct {
 	pkColumns       []string
 	done            bool
 	tablesCompleted map[string]bool
-	log             interface{ Info(msg string, args ...any) }
+	log             interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 type tableInfo struct {
@@ -50,7 +52,7 @@ func newCockroachDBScanner(pool *pgxpool.Pool, opts provider.ScanOptions) *cockr
 	if len(opts.ResumeToken) > 0 {
 		if stats, err := provider.UnmarshalScanToken(opts.ResumeToken); err == nil {
 			s.stats = stats
-			s.log.Info("resuming from checkpoint",
+			s.log.Debug("resuming from checkpoint",
 				"tables_done", stats.TablesDone,
 				"tables_total", stats.TablesTotal,
 				"rows_scanned", stats.TotalScanned,
@@ -88,7 +90,7 @@ func (s *cockroachDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit
 		if s.rows != nil && s.rows.Next() {
 			unit, err := s.readRow(ctx)
 			if err != nil {
-				s.log.Info("failed to read row, skipping",
+				s.log.Debug("failed to read row, skipping",
 					"table", s.tables[s.currentTable].Name, "error", err)
 				continue
 			}
@@ -99,7 +101,7 @@ func (s *cockroachDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit
 		}
 		if s.rows != nil {
 			if err := s.rows.Err(); err != nil {
-				s.log.Info("row error", "table", s.tables[s.currentTable].Name, "error", err)
+				s.log.Debug("row error", "table", s.tables[s.currentTable].Name, "error", err)
 			}
 			s.rows.Close()
 			s.rows = nil
@@ -111,9 +113,9 @@ func (s *cockroachDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit
 			break
 		}
 		table := s.tables[s.currentTable]
-		s.log.Info("scanning table", "schema", table.Schema, "table", table.Name)
+		s.log.Debug("scanning table", "schema", table.Schema, "table", table.Name)
 		if err := s.getTableInfo(ctx, table); err != nil {
-			s.log.Info("failed to get table info", "table", table.Name, "error", err)
+			s.log.Debug("failed to get table info", "table", table.Name, "error", err)
 			s.currentTable++
 			s.stats.TablesDone++
 			continue
@@ -121,7 +123,7 @@ func (s *cockroachDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit
 		query := s.buildScanQuery(table)
 		rows, err := s.pool.Query(ctx, query)
 		if err != nil {
-			s.log.Info("failed to open cursor for table", "table", table.Name, "error", err)
+			s.log.Debug("failed to open cursor for table", "table", table.Name, "error", err)
 			s.currentTable++
 			s.stats.TablesDone++
 			continue
@@ -135,6 +137,15 @@ func (s *cockroachDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit
 }
 
 func (s *cockroachDBScanner) Stats() provider.ScanStats { return s.stats }
+
+func (s *cockroachDBScanner) Close() error {
+	if s.rows != nil {
+		s.rows.Close()
+		s.rows = nil
+		s.done = true
+	}
+	return nil
+}
 
 func (s *cockroachDBScanner) listTables(ctx context.Context) error {
 	rows, err := s.pool.Query(ctx, `
@@ -172,7 +183,7 @@ func (s *cockroachDBScanner) listTables(ctx context.Context) error {
 			s.currentTable = len(s.tables)
 		}
 	}
-	s.log.Info("found tables", "count", len(s.tables))
+	s.log.Debug("found tables", "count", len(s.tables))
 	return nil
 }
 

@@ -135,6 +135,8 @@ func (s *testScanner) Stats() provider.ScanStats {
 	}
 }
 
+func (s *testScanner) Close() error { return nil }
+
 type testWriter struct {
 	p *testProvider
 }

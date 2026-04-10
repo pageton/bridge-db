@@ -24,6 +24,12 @@ func crdbSafeDefault(defaultVal string) (string, bool) {
 	allowed := []string{"NOW()", "CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "GEN_RANDOM_UUID()", "UUID_GENERATE_V4()", "NEXTVAL(", "UNIQUE_ROWID"}
 	for _, fn := range allowed {
 		if strings.Contains(upper, fn) {
+			switch upper {
+			case "CURRENT_TIMESTAMP()":
+				return "CURRENT_TIMESTAMP", true
+			case "NOW()":
+				return "CURRENT_TIMESTAMP", true
+			}
 			return defaultVal, true
 		}
 	}
@@ -35,7 +41,9 @@ func crdbSafeDefault(defaultVal string) (string, bool) {
 
 type cockroachDBSchemaMigrator struct {
 	pool *pgxpool.Pool
-	log  interface{ Info(msg string, args ...any) }
+	log  interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 func newCockroachDBSchemaMigrator(pool *pgxpool.Pool) *cockroachDBSchemaMigrator {
@@ -70,13 +78,13 @@ func (m *cockroachDBSchemaMigrator) Inspect(ctx context.Context) (*provider.Sche
 
 		columns, err := m.getTableColumns(ctx, tblSchema, tableName)
 		if err != nil {
-			m.log.Info("failed to get columns", "table", tableName, "error", err)
+			m.log.Debug("failed to get columns", "table", tableName, "error", err)
 			continue
 		}
 
 		indexes, err := m.getTableIndexes(ctx, tblSchema, tableName)
 		if err != nil {
-			m.log.Info("failed to get indexes", "table", tableName, "error", err)
+			m.log.Debug("failed to get indexes", "table", tableName, "error", err)
 			continue
 		}
 
@@ -254,11 +262,11 @@ func (m *cockroachDBSchemaMigrator) createTable(ctx context.Context, table provi
 			continue
 		}
 		if err := m.createIndex(ctx, table.Name, idx); err != nil {
-			m.log.Info("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
+			m.log.Debug("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
 		}
 	}
 
-	m.log.Info("created table", "table", table.Name)
+	m.log.Debug("created table", "table", table.Name)
 	return nil
 }
 

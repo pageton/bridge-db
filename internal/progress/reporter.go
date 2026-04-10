@@ -3,6 +3,7 @@
 package progress
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,23 +23,27 @@ import (
 // callers that don't need progress feedback.
 type NopReporter struct{}
 
-func (NopReporter) OnBatchStart(_ int, _ int)                        {}
-func (NopReporter) OnBatchComplete(_ int, _ *provider.BatchResult)   {}
-func (NopReporter) OnMigrationComplete(_ *provider.MigrationSummary) {}
-func (NopReporter) OnError(_ error, _ *provider.MigrationUnit)       {}
-func (NopReporter) OnPhaseChange(_ provider.MigrationPhase)          {}
-func (NopReporter) OnProgress(_ provider.ProgressStats)              {}
+func (NopReporter) OnBatchStart(_ int, _ int)                                  {}
+func (NopReporter) OnBatchComplete(_ int, _ *provider.BatchResult)             {}
+func (NopReporter) OnMigrationComplete(_ *provider.MigrationSummary)           {}
+func (NopReporter) OnError(_ error, _ *provider.MigrationUnit)                 {}
+func (NopReporter) OnPhaseChange(_ provider.MigrationPhase)                    {}
+func (NopReporter) OnPhaseStart(_ provider.PhaseDesc)                          {}
+func (NopReporter) OnPhaseDone(_ provider.PhaseDesc, _ time.Duration, _ error) {}
+func (NopReporter) OnProgress(_ provider.ProgressStats)                        {}
 
 // ---------------------------------------------------------------------------
 // ConsoleReporter
 // ---------------------------------------------------------------------------
 
-// ConsoleReporter prints progress to an io.Writer using carriage-return
-// overwriting for a compact single-line progress display.
+// ConsoleReporter prints structured, numbered phase output to an io.Writer.
+// Each phase shows a clear header line, live progress during data transfer,
+// and an indented completion line (done / skipped / FAILED).
 type ConsoleReporter struct {
-	w    io.Writer
-	mu   sync.Mutex
-	last string
+	w       io.Writer
+	mu      sync.Mutex
+	last    string // last carriage-return line (for overwriting)
+	current provider.PhaseDesc
 }
 
 // NewConsoleReporter creates a reporter that writes to os.Stdout.
@@ -51,78 +56,75 @@ func NewConsoleReporterWith(w io.Writer) *ConsoleReporter {
 	return &ConsoleReporter{w: w}
 }
 
-func (r *ConsoleReporter) OnBatchStart(batchID int, unitCount int) {
-	r.printf("  [BATCH %d] Processing %d units...", batchID, unitCount)
+// OnBatchStart is a no-op in the console reporter; progress is shown via
+// OnProgress instead of per-batch messages.
+func (r *ConsoleReporter) OnBatchStart(_ int, _ int) {}
+
+// OnBatchComplete is a no-op in the console reporter.
+func (r *ConsoleReporter) OnBatchComplete(_ int, _ *provider.BatchResult) {}
+
+// OnPhaseStart prints the phase header: [N/M] Description
+func (r *ConsoleReporter) OnPhaseStart(desc provider.PhaseDesc) {
+	r.mu.Lock()
+	r.current = desc
+	r.mu.Unlock()
+	r.println(fmt.Sprintf("[%d/%d] %s", desc.Step, desc.TotalSteps, desc.Description))
 }
 
-func (r *ConsoleReporter) OnBatchComplete(batchID int, result *provider.BatchResult) {
-	r.printf("  [BATCH %d] Written %d | Skipped %d | Failed %d | %v",
-		batchID, result.WrittenUnits, result.SkippedUnits, result.FailedUnits, result.Duration.Round(0))
+// OnPhaseDone prints the phase completion line, indented under the header.
+//   - success: "      done (duration)"
+//   - skipped: "      skipped"
+//   - error: "      FAILED: message"
+func (r *ConsoleReporter) OnPhaseDone(desc provider.PhaseDesc, dur time.Duration, err error) {
+	if err != nil {
+		if errors.Is(err, provider.ErrPhaseSkipped) {
+			r.println("      skipped")
+			return
+		}
+		r.println(fmt.Sprintf("      FAILED: %s", err))
+		return
+	}
+	r.println(fmt.Sprintf("      done (%s)", util.FormatDuration(dur)))
 }
 
+// OnPhaseChange is a legacy entry point kept for backward compat. It is a
+// no-op; the pipeline uses OnPhaseStart/OnPhaseDone instead.
+func (r *ConsoleReporter) OnPhaseChange(_ provider.MigrationPhase) {}
+
+// OnMigrationComplete prints a brief completion line after all phases.
+// The detailed summary is printed separately by the CLI layer.
 func (r *ConsoleReporter) OnMigrationComplete(summary *provider.MigrationSummary) {
 	r.println("")
-	r.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	r.println("  Migration Complete")
-	r.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	r.println(fmt.Sprintf("  Duration:     %s", summary.Duration.Round(time.Millisecond)))
-	r.println(fmt.Sprintf("  Records:      %d scanned / %d written / %d failed / %d skipped",
-		summary.TotalScanned, summary.TotalWritten, summary.TotalFailed, summary.TotalSkipped))
-	r.println(fmt.Sprintf("  Transferred:  %s", util.HumanBytes(summary.BytesTransferred)))
-	if summary.AvgThroughput > 0 {
-		r.println(fmt.Sprintf("  Throughput:   %.0f avg / %.0f peak units/s", summary.AvgThroughput, summary.PeakThroughput))
-	}
-	if summary.VerificationOK {
-		r.println("  Verification: PASSED")
-	} else if len(summary.VerificationErrs) > 0 {
-		r.println(fmt.Sprintf("  Verification: %d MISMATCHES", len(summary.VerificationErrs)))
-	}
-	if len(summary.Errors) > 0 {
-		r.println(fmt.Sprintf("  Errors:       %d", len(summary.Errors)))
-	}
-
-	// Per-table breakdown
-	if len(summary.TableMetrics) > 0 {
-		r.println("")
-		r.println("  Per-table breakdown:")
-		r.println(fmt.Sprintf("  %-30s %8s %8s %8s %10s", "Table", "Scanned", "Written", "Failed", "Size"))
-		r.println("  " + strings.Repeat("-", 70))
-		for _, tm := range summary.TableMetrics {
-			r.println(fmt.Sprintf("  %-30s %8d %8d %8d %10s",
-				util.Truncate(tm.Table, 30), tm.Scanned, tm.Written, tm.Failed, util.HumanBytes(tm.Bytes)))
-		}
-	}
-
-	r.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	r.println("\u2714 Migration completed successfully")
+	r.println(fmt.Sprintf("  %d records written in %s",
+		summary.TotalWritten, util.FormatDuration(summary.Duration)))
 }
 
+// OnError prints an error indented under the current phase.
 func (r *ConsoleReporter) OnError(err error, _ *provider.MigrationUnit) {
-	r.println(fmt.Sprintf("  [ERROR] %s", err.Error()))
+	r.println(fmt.Sprintf("      [ERROR] %s", err.Error()))
 }
 
-func (r *ConsoleReporter) OnPhaseChange(phase provider.MigrationPhase) {
-	label := phaseLabel(phase)
-	r.println(fmt.Sprintf("[%s]", label))
-}
-
+// OnProgress shows a live progress line during data transfer, overwritten
+// in-place using carriage returns.
 func (r *ConsoleReporter) OnProgress(stats provider.ProgressStats) {
-	label := phaseLabel(stats.Phase)
-	eta := formatDuration(stats.EstimatedRemain)
-	elapsed := formatDuration(stats.Elapsed)
+	elapsed := util.FormatDuration(stats.Elapsed)
+	eta := util.FormatDuration(stats.EstimatedRemain)
 
-	var tableInfo string
+	var parts []string
+	parts = append(parts, fmt.Sprintf("%d written", stats.TotalWritten))
+	parts = append(parts, fmt.Sprintf("%.0f records/s", stats.Throughput))
+	parts = append(parts, elapsed)
+
 	if stats.CurrentTable != "" {
-		tableInfo = fmt.Sprintf(" | table: %s", stats.CurrentTable)
+		parts = append(parts, fmt.Sprintf("table: %s", stats.CurrentTable))
 	}
-	var tableProgress string
 	if stats.TablesTotal > 0 {
-		tableProgress = fmt.Sprintf(" | %d/%d tables", stats.TablesCompleted, stats.TablesTotal)
+		parts = append(parts, fmt.Sprintf("%d/%d tables", stats.TablesCompleted, stats.TablesTotal))
 	}
+	parts = append(parts, fmt.Sprintf("ETA: %s", eta))
 
-	r.printf("[%s] %d written | %.0f units/s | %s%s%s | ETA: %s",
-		label, stats.TotalWritten, stats.Throughput, elapsed,
-		tableInfo, tableProgress, eta,
-	)
+	r.printf("      %s", strings.Join(parts, " | "))
 }
 
 // ---------------------------------------------------------------------------
@@ -133,19 +135,15 @@ func (r *ConsoleReporter) printf(format string, args ...any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	line := fmt.Sprintf(format, args...)
-	if strings.HasPrefix(line, "\r") {
-		_, _ = fmt.Fprint(r.w, line)
-	} else {
-		if r.last != "" {
-			clearLen := len(r.last)
-			if clearLen > len(line) {
-				_, _ = fmt.Fprintf(r.w, "\r%s\r%s", strings.Repeat(" ", clearLen), line)
-			} else {
-				_, _ = fmt.Fprintf(r.w, "\r%s", line)
-			}
+	if r.last != "" {
+		clearLen := len(r.last)
+		if clearLen > len(line) {
+			_, _ = fmt.Fprintf(r.w, "\r%s\r%s", strings.Repeat(" ", clearLen), line)
 		} else {
-			_, _ = fmt.Fprint(r.w, line)
+			_, _ = fmt.Fprintf(r.w, "\r%s", line)
 		}
+	} else {
+		_, _ = fmt.Fprint(r.w, line)
 	}
 	r.last = line
 }
@@ -153,45 +151,16 @@ func (r *ConsoleReporter) printf(format string, args ...any) {
 func (r *ConsoleReporter) println(line string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, _ = fmt.Fprintln(r.w, line)
+	if r.last != "" {
+		// Clear the current \r progress line before printing a new line.
+		clearLen := len(r.last)
+		if clearLen > len(line) {
+			_, _ = fmt.Fprintf(r.w, "\r%s\r%s\n", strings.Repeat(" ", clearLen), line)
+		} else {
+			_, _ = fmt.Fprintf(r.w, "\r%s\n", line)
+		}
+	} else {
+		_, _ = fmt.Fprintln(r.w, line)
+	}
 	r.last = ""
-}
-
-func phaseLabel(phase provider.MigrationPhase) string {
-	switch phase {
-	case provider.PhaseInit:
-		return "INIT"
-	case provider.PhaseTunnel:
-		return "TUNNEL"
-	case provider.PhaseConnect:
-		return "CONNECTING"
-	case provider.PhaseSchemaMigration:
-		return "SCHEMA"
-	case provider.PhaseScanning:
-		return "SCANNING"
-	case provider.PhaseTransforming:
-		return "TRANSFORMING"
-	case provider.PhaseWriting:
-		return "WRITING"
-	case provider.PhaseVerifying:
-		return "VERIFYING"
-	case provider.PhaseComplete:
-		return "COMPLETE"
-	case provider.PhaseError:
-		return "ERROR"
-	case provider.PhasePaused:
-		return "PAUSED"
-	default:
-		return strings.ToUpper(string(phase))
-	}
-}
-
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
-	}
-	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
 }

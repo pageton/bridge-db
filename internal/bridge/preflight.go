@@ -46,7 +46,7 @@ func (p *Pipeline) runPreflight(ctx context.Context) error {
 		return fmt.Errorf("pre-migration validation failed:\n  \u2022 %s", strings.Join(errs, "\n  \u2022 "))
 	}
 
-	log.Info("preflight checks passed")
+	log.Debug("preflight checks passed")
 	return nil
 }
 

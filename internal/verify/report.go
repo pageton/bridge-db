@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
+
+	"github.com/pageton/bridge-db/internal/util"
 )
 
 // FormatTable renders the report as a human-readable table with per-table
@@ -100,8 +102,14 @@ func FormatTable(report *VerificationReport) string {
 		}
 	}
 
-	fmt.Fprintf(&b, "%s\n", strings.Repeat("=", 27))
 	return b.String()
+}
+
+// FormatCompact renders a one-line verification status for successful reports.
+func FormatCompact(report *VerificationReport) string {
+	return fmt.Sprintf("Verification: %s (%d tables, %d sampled, %s)",
+		report.Status, report.TotalTables, report.TotalSampled,
+		util.FormatDuration(report.Duration))
 }
 
 // FormatJSON renders the report as JSON.

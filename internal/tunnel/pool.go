@@ -43,7 +43,7 @@ func (p *Pool) OpenAll(ctx context.Context, configs map[string]Config) error {
 		if !cfg.Enabled {
 			p.tunnels[name] = NoopTunnel{}
 			p.configs[name] = cfg
-			log.Info("tunnel disabled, using noop", "connection", name)
+			log.Debug("tunnel disabled, using noop", "connection", name)
 			continue
 		}
 
@@ -76,7 +76,7 @@ func (p *Pool) OpenAll(ctx context.Context, configs map[string]Config) error {
 		p.configs[name] = cfg
 		opened = append(opened, name)
 
-		log.Info("tunnel opened",
+		log.Debug("tunnel opened",
 			"connection", name,
 			"local_addr", t.LocalAddr(),
 			"remote_addr", fmt.Sprintf("%s:%d", cfg.RemoteHost, cfg.RemotePort),

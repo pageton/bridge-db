@@ -16,7 +16,10 @@ import (
 
 type sqliteVerifier struct {
 	db  *sql.DB
-	log interface{ Info(msg string, args ...any) }
+	log interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
 }
 
 func newSQLiteVerifier(db *sql.DB) *sqliteVerifier {

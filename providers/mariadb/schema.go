@@ -12,7 +12,9 @@ import (
 
 type mariaDBSchemaMigrator struct {
 	db  *sql.DB
-	log interface{ Info(msg string, args ...any) }
+	log interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 func newMariaDBSchemaMigrator(db *sql.DB) *mariaDBSchemaMigrator {
@@ -37,12 +39,12 @@ func (m *mariaDBSchemaMigrator) Inspect(ctx context.Context) (*provider.Schema, 
 		}
 		columns, err := m.getTableColumns(ctx, tableName)
 		if err != nil {
-			m.log.Info("failed to get columns", "table", tableName, "error", err)
+			m.log.Debug("failed to get columns", "table", tableName, "error", err)
 			continue
 		}
 		indexes, err := m.getTableIndexes(ctx, tableName)
 		if err != nil {
-			m.log.Info("failed to get indexes", "table", tableName, "error", err)
+			m.log.Debug("failed to get indexes", "table", tableName, "error", err)
 			continue
 		}
 		schema.Tables = append(schema.Tables, provider.TableSchema{
@@ -205,10 +207,10 @@ func (m *mariaDBSchemaMigrator) createTable(ctx context.Context, table provider.
 			continue
 		}
 		if err := m.createIndex(ctx, table.Name, idx); err != nil {
-			m.log.Info("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
+			m.log.Debug("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
 		}
 	}
-	m.log.Info("created table", "table", table.Name)
+	m.log.Debug("created table", "table", table.Name)
 	return nil
 }
 

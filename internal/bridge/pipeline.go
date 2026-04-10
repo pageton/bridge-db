@@ -110,6 +110,34 @@ func (p *Pipeline) stepLog(step int, phase string) *slog.Logger {
 	return logger.L().With("component", "pipeline", "step", step, "phase", phase)
 }
 
+// visiblePhases defines the ordered set of phases shown to the user.
+// The step number and total are derived from this slice's position and length.
+var visiblePhases = []provider.PhaseDesc{
+	{Phase: provider.PhaseInit, Description: "Validating config"},
+	{Phase: provider.PhaseTunnel, Description: "Validating connections"},
+	{Phase: provider.PhaseConnect, Description: "Connecting to databases"},
+	{Phase: provider.PhaseSchemaMigration, Description: "Inspecting schema"},
+	{Phase: provider.PhasePlanning, Description: "Building migration plan"},
+	{Phase: provider.PhaseScanning, Description: "Transferring data"},
+	{Phase: provider.PhaseVerifying, Description: "Verifying data"},
+	{Phase: provider.PhaseFinalizing, Description: "Cleaning up"},
+}
+
+// phaseDesc returns a numbered PhaseDesc for a given MigrationPhase.
+func phaseDesc(phase provider.MigrationPhase) provider.PhaseDesc {
+	for i, vp := range visiblePhases {
+		if vp.Phase == phase {
+			return provider.PhaseDesc{
+				Phase:       phase,
+				Step:        i + 1,
+				TotalSteps:  len(visiblePhases),
+				Description: vp.Description,
+			}
+		}
+	}
+	return provider.PhaseDesc{Phase: phase, Step: 0, TotalSteps: len(visiblePhases), Description: string(phase)}
+}
+
 // Run executes the full migration pipeline following a 10-step sequence:
 //
 //  1. Load config        — validate pipeline options
@@ -149,23 +177,37 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 		return nil, err
 	}
 
-	logger.L().Info("step completed", "step", 1, "phase", "init", "duration", result.Phases[len(result.Phases)-1].Duration)
+	logger.L().Debug("step completed", "step", 1, "phase", "init", "duration", result.Phases[len(result.Phases)-1].Duration)
 
 	// Step 2: Validate source and destination — establish SSH tunnels.
 	if err := p.stepValidate(ctx, result); err != nil {
 		return nil, err
 	}
-	logger.L().Info("step completed", "step", 2, "phase", "tunnel", "duration", result.Phases[len(result.Phases)-1].Duration)
+	logger.L().Debug("step completed", "step", 2, "phase", "tunnel", "duration", result.Phases[len(result.Phases)-1].Duration)
 	defer func() { _ = p.tunnels.CloseAll() }()
 
 	// Step 3: Initialize providers — connect to source and destination.
 	if err := p.stepInitProviders(ctx, result); err != nil {
 		return nil, err
 	}
-	logger.L().Info("step completed", "step", 3, "phase", "connect", "duration", result.Phases[len(result.Phases)-1].Duration)
+	logger.L().Debug("step completed", "step", 3, "phase", "connect", "duration", result.Phases[len(result.Phases)-1].Duration)
 
-	defer func() { _ = p.src.Close() }()
-	defer func() { _ = p.dst.Close() }()
+	defer func() {
+		done := make(chan struct{})
+		go func() { _ = p.src.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}()
+	defer func() {
+		done := make(chan struct{})
+		go func() { _ = p.dst.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}()
 
 	// Step 4: Inspect schema/metadata — load checkpoint, inspect and migrate schema.
 	if err := p.stepInspect(ctx, result, ms); err != nil {
@@ -182,7 +224,7 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 		return nil, err
 	}
 
-	logger.L().Info("step completed", "step", 8, "phase", "transfer", "duration", result.Phases[len(result.Phases)-1].Duration)
+	logger.L().Debug("step completed", "step", 8, "phase", "transfer", "duration", result.Phases[len(result.Phases)-1].Duration)
 
 	// Step 9: Verify results — compare source and destination data.
 	p.stepVerify(ctx, result, ms)
@@ -200,22 +242,27 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 // Step 1: Load config — validates pipeline options and logs migration parameters.
 func (p *Pipeline) stepLoadConfig(result *RunResult) error {
 	phaseStart := time.Now()
-	p.reporter.OnPhaseChange(provider.PhaseInit)
+	desc := phaseDesc(provider.PhaseInit)
+	p.reporter.OnPhaseStart(desc)
 
 	if err := p.opts.Validate(); err != nil {
+		p.reporter.OnPhaseDone(desc, time.Since(phaseStart), err)
 		return NewConfigError(1, "pipeline options", err)
 	}
 
-	logger.L().With("component", "pipeline").Info("migration starting",
+	logger.L().With("component", "pipeline").Debug("migration starting",
 		"source", p.config.Source.Provider,
 		"destination", p.config.Destination.Provider,
 		"cross_db", p.config.IsCrossDB(),
 		"dry_run", p.opts.DryRun,
 	)
 
+	dur := time.Since(phaseStart)
+	p.reporter.OnPhaseDone(desc, dur, nil)
+
 	result.Phases = append(result.Phases, PhaseResult{
 		Phase:    provider.PhaseInit,
-		Duration: time.Since(phaseStart),
+		Duration: dur,
 	})
 	return nil
 }
@@ -223,7 +270,8 @@ func (p *Pipeline) stepLoadConfig(result *RunResult) error {
 // Step 2: Validate source and destination — establishes SSH tunnels.
 func (p *Pipeline) stepValidate(ctx context.Context, result *RunResult) error {
 	phaseStart := time.Now()
-	p.reporter.OnPhaseChange(provider.PhaseTunnel)
+	desc := phaseDesc(provider.PhaseTunnel)
+	p.reporter.OnPhaseStart(desc)
 
 	tunnelConfigs := p.buildTunnelConfigs()
 
@@ -232,12 +280,16 @@ func (p *Pipeline) stepValidate(ctx context.Context, result *RunResult) error {
 	if err := retry.Do(ctx, tunnelRetry, func() error {
 		return p.tunnels.OpenAll(ctx, tunnelConfigs)
 	}); err != nil {
+		p.reporter.OnPhaseDone(desc, time.Since(phaseStart), err)
 		return p.abort(NewConnectionError("tunnel", "Failed to establish SSH tunnel to source or destination database", err).WithStep(2))
 	}
 
+	dur := time.Since(phaseStart)
+	p.reporter.OnPhaseDone(desc, dur, nil)
+
 	result.Phases = append(result.Phases, PhaseResult{
 		Phase:    provider.PhaseTunnel,
-		Duration: time.Since(phaseStart),
+		Duration: dur,
 	})
 	return nil
 }
@@ -246,7 +298,8 @@ func (p *Pipeline) stepValidate(ctx context.Context, result *RunResult) error {
 // destination. Resolves capabilities and sets up the transformer.
 func (p *Pipeline) stepInitProviders(ctx context.Context, result *RunResult) error {
 	phaseStart := time.Now()
-	p.reporter.OnPhaseChange(provider.PhaseConnect)
+	desc := phaseDesc(provider.PhaseConnect)
+	p.reporter.OnPhaseStart(desc)
 	log := p.stepLog(3, "connect")
 
 	// Create provider instances.
@@ -300,12 +353,12 @@ func (p *Pipeline) stepInitProviders(ctx context.Context, result *RunResult) err
 		return p.abort(NewConnectionError("connect", fmt.Sprintf("Destination %q is unreachable after connecting — it may have gone down", p.config.Destination.Provider), err).WithStep(3))
 	}
 
-	log.Info("connected to both databases")
+	log.Debug("connected to both databases")
 
 	// Resolve capabilities.
 	p.srcCaps = provider.ProviderCapabilities(p.src)
 	p.dstCaps = provider.ProviderCapabilities(p.dst)
-	log.Info("capabilities resolved",
+	log.Debug("capabilities resolved",
 		"source", p.srcCaps,
 		"destination", p.dstCaps,
 	)
@@ -313,7 +366,7 @@ func (p *Pipeline) stepInitProviders(ctx context.Context, result *RunResult) err
 	// Wrap destination for dry-run mode.
 	if p.opts.DryRun {
 		p.dst = p.dst.DryRun()
-		log.Info("dry-run mode enabled")
+		log.Debug("dry-run mode enabled")
 	}
 
 	// Resolve transformer.
@@ -323,17 +376,21 @@ func (p *Pipeline) stepInitProviders(ctx context.Context, result *RunResult) err
 		p.config.Destination.Provider,
 	)
 	if p.transformer.NeedsSchema() {
-		log.Info("transformer requires schema information")
+		log.Debug("transformer requires schema information")
 	}
 
 	// Run pre-migration validation before any data movement.
 	if err := p.runPreflight(ctx); err != nil {
+		p.reporter.OnPhaseDone(desc, time.Since(phaseStart), err)
 		return p.abort(err)
 	}
 
+	dur := time.Since(phaseStart)
+	p.reporter.OnPhaseDone(desc, dur, nil)
+
 	result.Phases = append(result.Phases, PhaseResult{
 		Phase:    provider.PhaseConnect,
-		Duration: time.Since(phaseStart),
+		Duration: dur,
 	})
 	return nil
 }
@@ -345,7 +402,7 @@ func (p *Pipeline) stepInspect(ctx context.Context, result *RunResult, ms *migra
 
 	// Load checkpoint.
 	if !p.opts.CheckpointEnabled {
-		log.Info("checkpointing disabled")
+		log.Debug("checkpointing disabled")
 	} else {
 		checkpoint, err := p.checkpoint.Load(ctx)
 		if err != nil {
@@ -355,19 +412,27 @@ func (p *Pipeline) stepInspect(ctx context.Context, result *RunResult, ms *migra
 		ms.checkpoint = checkpoint
 	}
 
-	// Schema migration.
+	// Schema migration — always report the phase to the user.
+	desc := phaseDesc(provider.PhaseSchemaMigration)
 	if p.shouldMigrateSchema() {
 		phaseStart := time.Now()
-		p.reporter.OnPhaseChange(provider.PhaseSchemaMigration)
+		p.reporter.OnPhaseStart(desc)
 
 		if err := p.migrateSchema(ctx); err != nil {
+			p.reporter.OnPhaseDone(desc, time.Since(phaseStart), err)
 			return p.abort(NewSchemaError(fmt.Sprintf("Schema migration from %s to %s failed — destination may have incompatible types or constraints", p.config.Source.Provider, p.config.Destination.Provider), err).WithStep(4))
 		}
 
+		dur := time.Since(phaseStart)
+		p.reporter.OnPhaseDone(desc, dur, nil)
+
 		result.Phases = append(result.Phases, PhaseResult{
 			Phase:    provider.PhaseSchemaMigration,
-			Duration: time.Since(phaseStart),
+			Duration: dur,
 		})
+	} else {
+		p.reporter.OnPhaseStart(desc)
+		p.reporter.OnPhaseDone(desc, 0, provider.ErrPhaseSkipped)
 	}
 
 	return nil
@@ -376,6 +441,9 @@ func (p *Pipeline) stepInspect(ctx context.Context, result *RunResult, ms *migra
 // Step 5: Plan migration — handles resume logic, builds a structured migration
 // plan, restores dedup state, and prepares the batch start ID.
 func (p *Pipeline) stepPlan(ctx context.Context, result *RunResult, ms *migrationState) error {
+	phaseStart := time.Now()
+	desc := phaseDesc(provider.PhasePlanning)
+	p.reporter.OnPhaseStart(desc)
 	log := p.stepLog(5, "plan")
 
 	if ms.checkpoint != nil && p.opts.Resume {
@@ -432,7 +500,7 @@ func (p *Pipeline) stepPlan(ctx context.Context, result *RunResult, ms *migratio
 			)
 		}
 
-		log.Info("resuming from checkpoint",
+		log.Debug("resuming from checkpoint",
 			"last_batch", ms.checkpoint.LastBatchID,
 			"total_written", ms.checkpoint.TotalWritten,
 			"tables_completed", len(ms.checkpoint.TablesCompleted),
@@ -441,7 +509,7 @@ func (p *Pipeline) stepPlan(ctx context.Context, result *RunResult, ms *migratio
 			"timestamp", ms.checkpoint.Timestamp,
 		)
 	} else if ms.checkpoint != nil {
-		log.Info("checkpoint found but --resume not set, starting fresh")
+		log.Debug("checkpoint found but --resume not set, starting fresh")
 		_ = p.checkpoint.Clear(ctx)
 		ms.checkpoint = nil
 	}
@@ -453,6 +521,13 @@ func (p *Pipeline) stepPlan(ctx context.Context, result *RunResult, ms *migratio
 	result.Plan = plan
 	logPlan(plan)
 
+	dur := time.Since(phaseStart)
+	p.reporter.OnPhaseDone(desc, dur, nil)
+
+	result.Phases = append(result.Phases, PhaseResult{
+		Phase:    provider.PhasePlanning,
+		Duration: dur,
+	})
 	return nil
 }
 
@@ -468,7 +543,8 @@ func (p *Pipeline) stepPlan(ctx context.Context, result *RunResult, ms *migratio
 // table or range-partitioned within a table).
 func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migrationState) error {
 	phaseStart := time.Now()
-	p.reporter.OnPhaseChange(provider.PhaseScanning)
+	desc := phaseDesc(provider.PhaseScanning)
+	p.reporter.OnPhaseStart(desc)
 	log := p.stepLog(8, "transfer")
 
 	scanOpts := provider.ScanOptions{
@@ -499,6 +575,7 @@ func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migr
 	go func() {
 		defer scanWg.Done()
 		defer close(scanCh)
+		defer scanner.Close()
 
 		for {
 			if err := ctx.Err(); err != nil {
@@ -543,7 +620,6 @@ func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migr
 
 			// Step 7: Transform — apply data transformation.
 			if !transform.IsNoopTransformer(p.transformer) {
-				p.reporter.OnPhaseChange(provider.PhaseTransforming)
 				transformErr := retry.Do(ctx, retry.Config{
 					MaxAttempts:     p.opts.MaxRetries + 1,
 					InitialInterval: p.opts.RetryBackoff,
@@ -583,7 +659,6 @@ func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migr
 				batchID++
 				p.metrics.RecordScan(int64(len(sub)), totalSize(sub))
 				p.reporter.OnBatchStart(batchID, len(sub))
-				p.reporter.OnPhaseChange(provider.PhaseWriting)
 				select {
 				case scanCh <- scanResult{batchID: batchID, units: sub}:
 				case <-ctx.Done():
@@ -662,6 +737,7 @@ func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migr
 	for _, bw := range batchWriters {
 		if err := bw.flush(ctx); err != nil {
 			p.saveCheckpoint(context.Background(), int(lastWrittenBatchID.Load()), scanner)
+			p.reporter.OnPhaseDone(desc, time.Since(phaseStart), err)
 			return p.abort(NewWriteErrorExhausted(0, err).WithStep(8))
 		}
 	}
@@ -669,14 +745,18 @@ func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migr
 	// Final checkpoint on cancellation for resumability.
 	if err := ctx.Err(); err != nil {
 		p.saveCheckpoint(context.Background(), int(lastWrittenBatchID.Load()), scanner)
+		p.reporter.OnPhaseDone(desc, time.Since(phaseStart), err)
 		return p.abort(NewCancelledError("Migration was cancelled", err).WithStep(8))
 	}
 
 	ms.allErrors = allErrors
 
+	dur := time.Since(phaseStart)
+	p.reporter.OnPhaseDone(desc, dur, nil)
+
 	result.Phases = append(result.Phases, PhaseResult{
 		Phase:    provider.PhaseWriting,
-		Duration: time.Since(phaseStart),
+		Duration: dur,
 	})
 	return nil
 }
@@ -684,16 +764,20 @@ func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migr
 // Step 9: Verify results — compares source and destination data using
 // capability-aware verification.
 func (p *Pipeline) stepVerify(ctx context.Context, result *RunResult, ms *migrationState) {
+	desc := phaseDesc(provider.PhaseVerifying)
+
 	if !p.opts.Verify {
+		p.reporter.OnPhaseStart(desc)
+		p.reporter.OnPhaseDone(desc, 0, provider.ErrPhaseSkipped)
 		return
 	}
 
 	phaseStart := time.Now()
-	p.reporter.OnPhaseChange(provider.PhaseVerifying)
+	p.reporter.OnPhaseStart(desc)
 	log := p.stepLog(9, "verify")
 
 	effectiveLevel := provider.EffectiveVerifyLevel(p.srcCaps, p.dstCaps)
-	log.Info("effective verification level", "level", effectiveLevel)
+	log.Debug("effective verification level", "level", effectiveLevel)
 
 	// Use user-provided verification options, falling back to defaults.
 	verifyOpts := p.opts.VerifyOptions
@@ -711,7 +795,7 @@ func (p *Pipeline) stepVerify(ctx context.Context, result *RunResult, ms *migrat
 			result.VerificationReport = report
 			ms.summary.VerificationOK = report.Passed()
 			ms.summary.VerificationErrs = verify.ToVerificationErrors(report)
-			log.Info("verification complete",
+			log.Debug("verification complete",
 				"status", report.Status,
 				"tables", report.TotalTables,
 				"passed", report.PassCount,
@@ -737,7 +821,7 @@ func (p *Pipeline) stepVerify(ctx context.Context, result *RunResult, ms *migrat
 			log.Warn("verification found mismatches", "count", len(verifierErrors))
 		} else {
 			ms.summary.VerificationOK = true
-			log.Info("verification passed")
+			log.Debug("verification passed")
 		}
 
 	default:
@@ -751,16 +835,21 @@ func (p *Pipeline) stepVerify(ctx context.Context, result *RunResult, ms *migrat
 		}}
 	}
 
+	dur := time.Since(phaseStart)
+	p.reporter.OnPhaseDone(desc, dur, nil)
+
 	result.Phases = append(result.Phases, PhaseResult{
 		Phase:    provider.PhaseVerifying,
-		Duration: time.Since(phaseStart),
+		Duration: dur,
 	})
 }
 
 // Step 10: Finalize — builds the migration summary, records failures,
 // clears the checkpoint, and reports completion.
 func (p *Pipeline) stepFinalize(ctx context.Context, result *RunResult, ms *migrationState) {
-	p.reporter.OnPhaseChange(provider.PhaseComplete)
+	phaseStart := time.Now()
+	desc := phaseDesc(provider.PhaseFinalizing)
+	p.reporter.OnPhaseStart(desc)
 	log := p.stepLog(10, "finalize")
 	_ = p.checkpoint.Clear(ctx)
 
@@ -775,9 +864,17 @@ func (p *Pipeline) stepFinalize(ctx context.Context, result *RunResult, ms *migr
 	result.Summary = ms.summary
 	result.CheckpointPath = p.config.Checkpoint.Path
 
+	dur := time.Since(phaseStart)
+	p.reporter.OnPhaseDone(desc, dur, nil)
+
 	p.reporter.OnMigrationComplete(ms.summary)
 
-	log.Info("migration complete",
+	result.Phases = append(result.Phases, PhaseResult{
+		Phase:    provider.PhaseFinalizing,
+		Duration: dur,
+	})
+
+	log.Debug("migration complete",
 		"duration", ms.summary.Duration.Round(time.Millisecond),
 		"written", ms.summary.TotalWritten,
 		"failed", ms.summary.TotalFailed,
@@ -1085,7 +1182,7 @@ func (p *Pipeline) migrateSchema(ctx context.Context) error {
 		if p.srcCaps.Schema {
 			log.Warn("source claims schema support but returned nil migrator — schema migration silently skipped")
 		} else {
-			log.Info("source has no schema migrator, skipping")
+			log.Debug("source has no schema migrator, skipping")
 		}
 		return nil
 	}
@@ -1095,7 +1192,7 @@ func (p *Pipeline) migrateSchema(ctx context.Context) error {
 		return fmt.Errorf("inspect source schema: %w", err)
 	}
 
-	log.Info("inspected source schema", "tables", len(schema.Tables))
+	log.Debug("inspected source schema", "tables", len(schema.Tables))
 
 	if p.transformer.NeedsSchema() {
 		p.transformer.SetSchema(schema)
@@ -1113,7 +1210,7 @@ func (p *Pipeline) migrateSchema(ctx context.Context) error {
 		}
 	}
 	if !hasColumns {
-		log.Info("source schema has no column definitions — skipping schema migration (NoSQL source)")
+		log.Debug("source schema has no column definitions — skipping schema migration (NoSQL source)")
 		return nil
 	}
 
@@ -1122,7 +1219,7 @@ func (p *Pipeline) migrateSchema(ctx context.Context) error {
 		if p.dstCaps.Schema {
 			log.Warn("destination claims schema support but returned nil migrator — schema migration silently skipped")
 		} else {
-			log.Info("destination has no schema migrator, skipping")
+			log.Debug("destination has no schema migrator, skipping")
 		}
 		return nil
 	}
@@ -1138,7 +1235,7 @@ func (p *Pipeline) migrateSchema(ctx context.Context) error {
 		return fmt.Errorf("create destination schema: %w", err)
 	}
 
-	log.Info("schema created on destination")
+	log.Debug("schema created on destination")
 	return nil
 }
 

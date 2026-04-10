@@ -16,7 +16,10 @@ import (
 // It verifies existence, type, and for sampled keys, value equality.
 type redisVerifier struct {
 	client *redis.Client
-	log    interface{ Info(msg string, args ...any) }
+	log    interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
 }
 
 func newRedisVerifier(client *redis.Client) *redisVerifier {

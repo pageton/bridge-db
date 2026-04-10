@@ -37,7 +37,9 @@ func pgSafeDefault(defaultVal string) (string, bool) {
 // It can inspect source schemas and create them on the destination.
 type postgresSchemaMigrator struct {
 	pool *pgxpool.Pool
-	log  interface{ Info(msg string, args ...any) }
+	log  interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 func newPostgresSchemaMigrator(pool *pgxpool.Pool) *postgresSchemaMigrator {
@@ -75,14 +77,14 @@ func (m *postgresSchemaMigrator) Inspect(ctx context.Context) (*provider.Schema,
 		// Get columns for this table
 		columns, err := m.getTableColumns(ctx, tableSchema, tableName)
 		if err != nil {
-			m.log.Info("failed to get columns", "table", tableName, "error", err)
+			m.log.Debug("failed to get columns", "table", tableName, "error", err)
 			continue
 		}
 
 		// Get indexes for this table
 		indexes, err := m.getTableIndexes(ctx, tableSchema, tableName)
 		if err != nil {
-			m.log.Info("failed to get indexes", "table", tableName, "error", err)
+			m.log.Debug("failed to get indexes", "table", tableName, "error", err)
 			continue
 		}
 
@@ -123,7 +125,16 @@ func (m *postgresSchemaMigrator) getTableColumns(ctx context.Context, schema, ta
 	query := `
 		SELECT 
 			c.column_name,
-			c.data_type,
+			CASE
+				WHEN c.data_type IN ('numeric', 'decimal') AND c.numeric_precision IS NOT NULL THEN
+					upper(c.data_type) || '(' || c.numeric_precision || ',' || COALESCE(c.numeric_scale, 0) || ')'
+				WHEN c.data_type IN ('character varying', 'character') AND c.character_maximum_length IS NOT NULL THEN
+					CASE
+						WHEN c.data_type = 'character varying' THEN 'VARCHAR(' || c.character_maximum_length || ')'
+						ELSE 'CHAR(' || c.character_maximum_length || ')'
+					END
+				ELSE upper(c.data_type)
+			END AS column_type,
 			c.is_nullable,
 			c.column_default,
 			CASE WHEN c.column_default LIKE 'nextval%' THEN true ELSE false END as is_auto_increment
@@ -211,7 +222,7 @@ func (m *postgresSchemaMigrator) createTable(ctx context.Context, table provider
 		}
 
 		if col.AutoInc {
-			switch colType {
+			switch strings.ToLower(colType) {
 			case "bigint", "bigserial":
 				colType = "BIGSERIAL"
 			case "smallint", "smallserial":
@@ -270,11 +281,11 @@ func (m *postgresSchemaMigrator) createTable(ctx context.Context, table provider
 		}
 
 		if err := m.createIndex(ctx, table.Name, idx); err != nil {
-			m.log.Info("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
+			m.log.Debug("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
 		}
 	}
 
-	m.log.Info("created table", "table", table.Name)
+	m.log.Debug("created table", "table", table.Name)
 	return nil
 }
 

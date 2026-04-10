@@ -63,7 +63,7 @@ func (p *MSSQLProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 	p.db = db
 
 	log := logger.L().With("provider", "mssql", "role", p.role)
-	log.Info("configured mssql client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
+	log.Debug("configured mssql client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
 
 	return nil
 }

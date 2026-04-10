@@ -10,13 +10,13 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"sort"
 	"strconv"
 	"sync"
 
-	"github.com/bytedance/sonic"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pageton/bridge-db/internal/config"
@@ -90,7 +90,7 @@ func (p *RedisProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 		log.Warn("redis connection is unencrypted — consider enabling TLS for non-local hosts",
 			"addr", cfg.Address())
 	}
-	log.Info("configured redis client", "addr", cfg.Address(), "db", cfg.DB)
+	log.Debug("configured redis client", "addr", cfg.Address(), "db", cfg.DB)
 
 	return nil
 }
@@ -298,20 +298,7 @@ func (p *RedisProvider) ComputeChecksums(ctx context.Context, keys []string) (ma
 			continue
 		}
 
-		// Sort the map keys for deterministic serialization
-		sortedKeys := make([]string, 0, len(data))
-		for k := range data {
-			sortedKeys = append(sortedKeys, k)
-		}
-		sort.Strings(sortedKeys)
-
-		sorted := make(map[string]any, len(sortedKeys))
-		for _, k := range sortedKeys {
-			sorted[k] = data[k]
-		}
-
-		// Serialize to deterministic JSON
-		jsonBytes, err := sonic.Marshal(sorted)
+		jsonBytes, err := marshalChecksumRecord(data)
 		if err != nil {
 			continue
 		}
@@ -322,6 +309,49 @@ func (p *RedisProvider) ComputeChecksums(ctx context.Context, keys []string) (ma
 	}
 
 	return result, nil
+}
+
+func marshalChecksumRecord(data map[string]any) ([]byte, error) {
+	normalized := make(map[string]any, len(data))
+	for k, v := range data {
+		normalized[k] = normalizeChecksumValue(data["type"], v)
+	}
+	return json.Marshal(normalized)
+}
+
+func normalizeChecksumValue(keyType any, value any) any {
+	switch v := value.(type) {
+	case map[string]string:
+		norm := make(map[string]any, len(v))
+		for k, item := range v {
+			norm[k] = item
+		}
+		return norm
+	case map[string]any:
+		norm := make(map[string]any, len(v))
+		for k, item := range v {
+			norm[k] = item
+		}
+		return norm
+	case []string:
+		if keyType == "set" {
+			norm := append([]string(nil), v...)
+			sort.Strings(norm)
+			return norm
+		}
+		return v
+	case []any:
+		if keyType == "set" {
+			norm := append([]any(nil), v...)
+			sort.Slice(norm, func(i, j int) bool {
+				return fmt.Sprint(norm[i]) < fmt.Sprint(norm[j])
+			})
+			return norm
+		}
+		return v
+	default:
+		return value
+	}
 }
 
 // ---------------------------------------------------------------------------

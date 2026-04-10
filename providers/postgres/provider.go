@@ -77,7 +77,7 @@ func (p *PostgresProvider) Connect(ctx context.Context, srcConfig, dstConfig any
 	p.pool = pool
 
 	log := logger.L().With("provider", "postgres", "role", p.role)
-	log.Info("configured postgres client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
+	log.Debug("configured postgres client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
 
 	return nil
 }

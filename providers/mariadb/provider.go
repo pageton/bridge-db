@@ -61,9 +61,9 @@ func (p *MariaDBProvider) Connect(_ context.Context, srcConfig, dstConfig any) e
 
 	log := logger.L().With("provider", "mariadb", "role", p.role)
 	if cfg.IsUnixSocket() {
-		log.Info("configured mariadb client", "socket", cfg.Host, "database", cfg.Database)
+		log.Debug("configured mariadb client", "socket", cfg.Host, "database", cfg.Database)
 	} else {
-		log.Info("configured mariadb client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
+		log.Debug("configured mariadb client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
 	}
 	return nil
 }

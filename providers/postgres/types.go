@@ -1,6 +1,8 @@
 package postgres
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -37,7 +39,9 @@ func encodePostgresRow(row *postgresRow) ([]byte, error) {
 // decodePostgresRow deserialises JSON bytes into a postgresRow.
 func decodePostgresRow(data []byte) (*postgresRow, error) {
 	var row postgresRow
-	if err := sonic.Unmarshal(data, &row); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&row); err != nil {
 		return nil, fmt.Errorf("decode postgres row: %w", err)
 	}
 	return &row, nil

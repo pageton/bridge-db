@@ -16,7 +16,10 @@ import (
 // It verifies row counts per table and performs sample-based comparison.
 type mysqlVerifier struct {
 	db  *sql.DB
-	log interface{ Info(msg string, args ...any) }
+	log interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
 }
 
 func newMySQLVerifier(db *sql.DB) *mysqlVerifier {

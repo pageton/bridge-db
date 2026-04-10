@@ -14,7 +14,10 @@ import (
 
 type mariaDBVerifier struct {
 	db  *sql.DB
-	log interface{ Info(msg string, args ...any) }
+	log interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+	}
 }
 
 func newMariaDBVerifier(db *sql.DB) *mariaDBVerifier {

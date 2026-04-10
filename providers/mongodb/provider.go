@@ -88,7 +88,7 @@ func (p *MongoDBProvider) Connect(_ context.Context, srcConfig, dstConfig any) e
 	p.database = client.Database(cfg.Database)
 
 	log := logger.L().With("provider", "mongodb", "role", p.role)
-	log.Info("configured mongodb client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
+	log.Debug("configured mongodb client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
 
 	return nil
 }

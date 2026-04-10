@@ -14,7 +14,10 @@ import (
 
 type mssqlSchemaMigrator struct {
 	db  *sql.DB
-	log interface{ Info(msg string, args ...any) }
+	log interface {
+		Warn(msg string, args ...any)
+		Debug(msg string, args ...any)
+	}
 }
 
 func newMSSQLSchemaMigrator(db *sql.DB) *mssqlSchemaMigrator {
@@ -43,13 +46,13 @@ func (m *mssqlSchemaMigrator) Inspect(ctx context.Context) (*provider.Schema, er
 
 		columns, err := m.getTableColumns(ctx, tableName)
 		if err != nil {
-			m.log.Info("failed to get columns", "table", tableName, "error", err)
+			m.log.Debug("failed to get columns", "table", tableName, "error", err)
 			continue
 		}
 
 		indexes, err := m.getTableIndexes(ctx, tableName)
 		if err != nil {
-			m.log.Info("failed to get indexes", "table", tableName, "error", err)
+			m.log.Debug("failed to get indexes", "table", tableName, "error", err)
 			continue
 		}
 
@@ -75,7 +78,7 @@ func (m *mssqlSchemaMigrator) Create(ctx context.Context, schema *provider.Schem
 
 func (m *mssqlSchemaMigrator) Drop(ctx context.Context, schema *provider.Schema) error {
 	if _, err := m.db.ExecContext(ctx, "EXEC sp_msforeachtable 'ALTER TABLE ? NOCHECK CONSTRAINT all'"); err != nil {
-		m.log.Info("warning: could not disable constraints", "error", err)
+		m.log.Debug("warning: could not disable constraints", "error", err)
 	}
 
 	for _, table := range schema.Tables {
@@ -149,7 +152,7 @@ func (m *mssqlSchemaMigrator) getTableIndexes(ctx context.Context, table string)
 		var isUnique, isPrimaryKey bool
 
 		if err := rows.Scan(&indexName, &isUnique, &isPrimaryKey, &columnName); err != nil {
-			m.log.Info("scan index row failed", "error", err)
+			m.log.Warn("scan index row failed", "error", err)
 			continue
 		}
 
@@ -245,11 +248,11 @@ func (m *mssqlSchemaMigrator) createTable(ctx context.Context, table provider.Ta
 		}
 
 		if err := m.createIndex(ctx, table.Name, idx); err != nil {
-			m.log.Info("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
+			m.log.Debug("failed to create index", "table", table.Name, "index", idx.Name, "error", err)
 		}
 	}
 
-	m.log.Info("created table", "table", table.Name)
+	m.log.Debug("created table", "table", table.Name)
 	return nil
 }
 

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -24,7 +25,11 @@ type postgresWriter struct {
 	failed  int64
 	skipped int64
 	bytes   int64
-	log     interface{ Info(msg string, args ...any) }
+	log     interface {
+		Info(msg string, args ...any)
+		Warn(msg string, args ...any)
+		Debug(msg string, args ...any)
+	}
 }
 
 func newPostgresWriter(pool *pgxpool.Pool, opts provider.WriteOptions) *postgresWriter {
@@ -57,7 +62,7 @@ func (w *postgresWriter) Write(ctx context.Context, units []provider.MigrationUn
 		row, err := decodePostgresRow(unit.Data)
 		if err != nil {
 			w.failed++
-			w.log.Info("failed to decode row", "key", unit.Key, "error", err)
+			w.log.Debug("failed to decode row", "key", unit.Key, "error", err)
 			continue
 		}
 
@@ -71,7 +76,7 @@ func (w *postgresWriter) Write(ctx context.Context, units []provider.MigrationUn
 	// Write each table's rows
 	for tableKey, rows := range tableRows {
 		if err := w.writeTable(ctx, tableKey, rows, &failedKeys, &errors); err != nil {
-			w.log.Info("failed to write table", "table", tableKey, "error", err)
+			w.log.Debug("failed to write table", "table", tableKey, "error", err)
 		}
 	}
 
@@ -186,7 +191,7 @@ func (w *postgresWriter) writeWithUpsert(ctx context.Context, schema, table stri
 	copied, err := w.pool.CopyFrom(ctx, tableName, columnNames, src)
 	if err != nil {
 		// COPY failed — fall back to batch INSERT with ON CONFLICT.
-		w.log.Info("COPY failed, falling back to batch INSERT", "error", err)
+		w.log.Debug("COPY failed, falling back to batch INSERT", "error", err)
 		return w.writeWithBatchUpsert(ctx, schema, table, columns, rows, failedKeys, errors)
 	}
 
@@ -391,6 +396,21 @@ func buildPKWhere(pk map[string]any, startIdx int) (string, []any) {
 
 func coercePostgresValue(v any, columnType string) any {
 	ct := strings.ToUpper(columnType)
+	if n, ok := v.(json.Number); ok {
+		switch {
+		case strings.Contains(ct, "INT") || strings.Contains(ct, "SERIAL"):
+			if i, err := n.Int64(); err == nil {
+				return i
+			}
+		case strings.HasPrefix(ct, "NUMERIC") || strings.HasPrefix(ct, "DECIMAL"):
+			return n.String()
+		case strings.HasPrefix(ct, "REAL") || strings.HasPrefix(ct, "DOUBLE"):
+			if f, err := n.Float64(); err == nil {
+				return f
+			}
+		}
+		return n.String()
+	}
 	if s, ok := v.(string); ok {
 		if strings.HasPrefix(ct, "TIMESTAMP") || strings.HasPrefix(ct, "TIMESTAMPTZ") {
 			for _, layout := range []string{

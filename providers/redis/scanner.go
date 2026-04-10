@@ -23,7 +23,9 @@ type redisScanner struct {
 	cursor    uint64
 	done      bool
 	processed map[string]struct{}
-	log       interface{ Info(msg string, args ...any) }
+	log       interface {
+		Debug(msg string, args ...any)
+	}
 }
 
 func newRedisScanner(client *redis.Client, opts provider.ScanOptions) *redisScanner {
@@ -42,7 +44,7 @@ func newRedisScanner(client *redis.Client, opts provider.ScanOptions) *redisScan
 			for _, k := range token.ProcessedKeys {
 				s.processed[k] = struct{}{}
 			}
-			s.log.Info("resuming from checkpoint",
+			s.log.Debug("resuming from checkpoint",
 				"already_processed", len(s.processed),
 				"total_scanned", token.TotalScanned,
 			)
@@ -97,7 +99,7 @@ func (s *redisScanner) Next(ctx context.Context) ([]provider.MigrationUnit, erro
 
 		unit, err := s.readKey(ctx, key)
 		if err != nil {
-			s.log.Info("failed to read key, skipping", "key", key, "error", err)
+			s.log.Debug("failed to read key, skipping", "key", key, "error", err)
 			continue
 		}
 		units = append(units, *unit)
@@ -122,6 +124,8 @@ func (s *redisScanner) Next(ctx context.Context) ([]provider.MigrationUnit, erro
 func (s *redisScanner) Stats() provider.ScanStats {
 	return s.stats
 }
+
+func (s *redisScanner) Close() error { return nil }
 
 // readKey reads a single Redis key and returns it as a MigrationUnit.
 // For large collection keys (hash, list, set, zset, stream), it uses
