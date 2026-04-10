@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pageton/bridge-db/internal/util"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
@@ -64,12 +65,13 @@ func (r *ConsoleReporter) OnMigrationComplete(summary *provider.MigrationSummary
 	r.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	r.println("  Migration Complete")
 	r.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	r.println(fmt.Sprintf("  Duration:     %s", summary.Duration.Round(0)))
-	r.println(fmt.Sprintf("  Scanned:      %d", summary.TotalScanned))
-	r.println(fmt.Sprintf("  Written:      %d", summary.TotalWritten))
-	r.println(fmt.Sprintf("  Failed:       %d", summary.TotalFailed))
-	r.println(fmt.Sprintf("  Skipped:      %d", summary.TotalSkipped))
-	r.println(fmt.Sprintf("  Transferred:  %s", humanBytes(summary.BytesTransferred)))
+	r.println(fmt.Sprintf("  Duration:     %s", summary.Duration.Round(time.Millisecond)))
+	r.println(fmt.Sprintf("  Records:      %d scanned / %d written / %d failed / %d skipped",
+		summary.TotalScanned, summary.TotalWritten, summary.TotalFailed, summary.TotalSkipped))
+	r.println(fmt.Sprintf("  Transferred:  %s", util.HumanBytes(summary.BytesTransferred)))
+	if summary.AvgThroughput > 0 {
+		r.println(fmt.Sprintf("  Throughput:   %.0f avg / %.0f peak units/s", summary.AvgThroughput, summary.PeakThroughput))
+	}
 	if summary.VerificationOK {
 		r.println("  Verification: PASSED")
 	} else if len(summary.VerificationErrs) > 0 {
@@ -78,6 +80,19 @@ func (r *ConsoleReporter) OnMigrationComplete(summary *provider.MigrationSummary
 	if len(summary.Errors) > 0 {
 		r.println(fmt.Sprintf("  Errors:       %d", len(summary.Errors)))
 	}
+
+	// Per-table breakdown
+	if len(summary.TableMetrics) > 0 {
+		r.println("")
+		r.println("  Per-table breakdown:")
+		r.println(fmt.Sprintf("  %-30s %8s %8s %8s %10s", "Table", "Scanned", "Written", "Failed", "Size"))
+		r.println("  " + strings.Repeat("-", 70))
+		for _, tm := range summary.TableMetrics {
+			r.println(fmt.Sprintf("  %-30s %8d %8d %8d %10s",
+				util.Truncate(tm.Table, 30), tm.Scanned, tm.Written, tm.Failed, util.HumanBytes(tm.Bytes)))
+		}
+	}
+
 	r.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 }
 
@@ -93,9 +108,20 @@ func (r *ConsoleReporter) OnPhaseChange(phase provider.MigrationPhase) {
 func (r *ConsoleReporter) OnProgress(stats provider.ProgressStats) {
 	label := phaseLabel(stats.Phase)
 	eta := formatDuration(stats.EstimatedRemain)
-	r.printf("[%s] %d scanned | %d written | %d failed | %.0f units/s | ETA: %s",
-		label, stats.TotalScanned, stats.TotalWritten, stats.TotalFailed,
-		stats.Throughput, eta,
+	elapsed := formatDuration(stats.Elapsed)
+
+	var tableInfo string
+	if stats.CurrentTable != "" {
+		tableInfo = fmt.Sprintf(" | table: %s", stats.CurrentTable)
+	}
+	var tableProgress string
+	if stats.TablesTotal > 0 {
+		tableProgress = fmt.Sprintf(" | %d/%d tables", stats.TablesCompleted, stats.TablesTotal)
+	}
+
+	r.printf("[%s] %d written | %.0f units/s | %s%s%s | ETA: %s",
+		label, stats.TotalWritten, stats.Throughput, elapsed,
+		tableInfo, tableProgress, eta,
 	)
 }
 
@@ -158,19 +184,6 @@ func phaseLabel(phase provider.MigrationPhase) string {
 	default:
 		return strings.ToUpper(string(phase))
 	}
-}
-
-func humanBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 func formatDuration(d time.Duration) string {
