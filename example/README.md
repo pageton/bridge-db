@@ -13,16 +13,16 @@ This auto-starts all databases, seeds them with test data, and prints connection
 
 ## Databases
 
-| Database | Primary | Secondary |
-|----------|---------|-----------|
-| Redis | `redis://localhost:6379` | `redis://localhost:6380` |
-| MongoDB | `mongodb://localhost:27017/testdb` | `mongodb://localhost:27018/testdb` |
-| SQLite | `sqlite://$SEED_DIR/test.db` | — |
-| PostgreSQL | `postgresql://127.0.0.1:5432/testdb?sslmode=disable` | `postgresql://127.0.0.1:5433/testdb?sslmode=disable` |
-| MySQL | `mysql://root@127.0.0.1:3306/testdb` | `mysql://root@127.0.0.1:3307/testdb` |
-| MariaDB | `mariadb://root@127.0.0.1:3308/testdb` | `mariadb://root@127.0.0.1:3309/testdb` |
+| Database    | Primary                                                     | Secondary                                                   |
+| ----------- | ----------------------------------------------------------- | ----------------------------------------------------------- |
+| Redis       | `redis://localhost:6379`                                    | `redis://localhost:6380`                                    |
+| MongoDB     | `mongodb://localhost:27017/testdb`                          | `mongodb://localhost:27018/testdb`                          |
+| SQLite      | `sqlite://$SEED_DIR/test.db`                                | —                                                           |
+| PostgreSQL  | `postgresql://127.0.0.1:5432/testdb?sslmode=disable`        | `postgresql://127.0.0.1:5433/testdb?sslmode=disable`        |
+| MySQL       | `mysql://root@127.0.0.1:3306/testdb`                        | `mysql://root@127.0.0.1:3307/testdb`                        |
+| MariaDB     | `mariadb://root@127.0.0.1:3308/testdb`                      | `mariadb://root@127.0.0.1:3309/testdb`                      |
 | CockroachDB | `cockroachdb://root@localhost:26257/testdb?sslmode=disable` | `cockroachdb://root@localhost:26258/testdb?sslmode=disable` |
-| MSSQL | `mssql://sa:BridgeDb123!@localhost:1433/testdb` | `mssql://sa:BridgeDb123!@localhost:1434/testdb` |
+| MSSQL       | `mssql://sa:BridgeDb123!@localhost:1433/testdb`             | `mssql://sa:BridgeDb123!@localhost:1434/testdb`             |
 
 ### MSSQL (Docker only)
 
@@ -58,6 +58,41 @@ Each SQL database gets three tables with 25+ rows:
 - **orders** — 32 rows (user_id, product_id, quantity, total_price)
 
 Redis gets matching hash keys, string keys, and list keys. MongoDB gets matching collections.
+
+## Output format
+
+Each migration runs through 8 numbered phases, shown with progress during transfer:
+
+```
+[1/8] Loading config
+      done (2ms)
+[2/8] Validating source and destination
+      done (5ms)
+[3/8] Connecting to databases
+      done (120ms)
+[4/8] Migrating schema
+      done (45ms)
+[5/8] Building migration plan
+      done (1ms)
+[6/8] Transferring data
+      820 written | 410 units/s | 2s | table: orders | 2/3 | ETA: 1s
+      done (4s)
+[7/8] Verifying results
+      done (1s)
+[8/8] Finalizing
+      done (1ms)
+
+Migration complete: 82 written in 5.5s
+```
+
+Phases that don't apply (schema migration disabled, verification disabled) are shown as `skipped`:
+
+```
+[4/8] Migrating schema
+      skipped
+```
+
+A detailed summary is printed after all phases complete.
 
 ## Example migrations
 

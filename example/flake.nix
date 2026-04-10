@@ -30,6 +30,7 @@
             mysql80
             mariadb
             cockroachdb
+            psmisc
             jq
             go
           ];
@@ -61,6 +62,19 @@
                         export MARIA_BIN="${pkgs.mariadb}/bin"
 
                         mkdir -p "$SEED_DIR"
+
+                        kill_port() {
+                          local port="$1"
+                          if fuser -s -n tcp "$port" 2>/dev/null; then
+                            fuser -k -n tcp "$port" > /dev/null 2>&1 || true
+                            sleep 1
+                          fi
+                        }
+
+                        kill_process() {
+                          local pattern="$1"
+                          pkill -f "$pattern" > /dev/null 2>&1 || true
+                        }
 
                         echo ""
                         echo "=== Bridge-DB Test Environment ==="
@@ -95,19 +109,44 @@
 
                         # ── Auto-start servers ──────────────────────────────────────
 
+                        # Stop any previously running test database processes first.
+                        kill_process redis-server
+                        kill_process mongod
+                        kill_process postgres
+                        kill_process mysqld
+                        kill_process mariadbd
+                        kill_process mariadbd-safe
+                        kill_process cockroach
+                        rm -f /tmp/bridge-test-*.sock
+
+                        # Free any stale listeners bound to the dev-shell ports.
+                        for port in 6379 6380 27017 27018 5432 5433 3306 3307 3308 3309 26257 26258 8079 8081; do
+                          kill_port "$port"
+                        done
+
                         # Redis (primary)
+                        mkdir -p "$REDIS_DIR"
+                        redis_primary_dir="$(redis-cli --raw CONFIG GET dir 2>/dev/null | tail -n 1 || true)"
+                        if redis-cli ping > /dev/null 2>&1 && [ "$redis_primary_dir" != "$REDIS_DIR" ]; then
+                          redis-cli shutdown nosave > /dev/null 2>&1 || true
+                          sleep 1
+                        fi
                         if ! redis-cli ping > /dev/null 2>&1; then
-                          mkdir -p "$REDIS_DIR"
-                          redis-server --dir "$REDIS_DIR" --daemonize yes --loglevel warning
+                          redis-server --dir "$REDIS_DIR" --port 6379 --save "" --appendonly no --daemonize yes --loglevel warning --logfile "$REDIS_DIR/redis.log"
                           echo "[auto] Redis (primary) started on port 6379"
                         else
                           echo "[auto] Redis (primary) already running"
                         fi
 
                         # Redis (secondary)
+                        mkdir -p "$REDIS2_DIR"
+                        redis_secondary_dir="$(redis-cli -p 6380 --raw CONFIG GET dir 2>/dev/null | tail -n 1 || true)"
+                        if redis-cli -p 6380 ping > /dev/null 2>&1 && [ "$redis_secondary_dir" != "$REDIS2_DIR" ]; then
+                          redis-cli -p 6380 shutdown nosave > /dev/null 2>&1 || true
+                          sleep 1
+                        fi
                         if ! redis-cli -p 6380 ping > /dev/null 2>&1; then
-                          mkdir -p "$REDIS2_DIR"
-                          redis-server --port 6380 --dir "$REDIS2_DIR" --daemonize yes --loglevel warning
+                          redis-server --port 6380 --dir "$REDIS2_DIR" --save "" --appendonly no --daemonize yes --loglevel warning --logfile "$REDIS2_DIR/redis.log"
                           echo "[auto] Redis (secondary) started on port 6380"
                         else
                           echo "[auto] Redis (secondary) already running"
@@ -202,13 +241,20 @@
                             mkdir -p "$MARIA_DIR"
                             $MARIA_BIN/mariadb-install-db --user=$USER --datadir="$MARIA_DIR" --auth-root-authentication-method=normal > /dev/null 2>&1
                           fi
-                          $MARIA_BIN/mariadbd --defaults-file=/dev/null --user=$USER --datadir="$MARIA_DIR" --socket="$MARIA_SOCK_DIR/$MARIA_SOCK" --port=3308 --bind-address=127.0.0.1 --pid-file="$MARIA_DIR/mariadb.pid" --daemonize > /dev/null 2>&1
-                          sleep 2
-                          if $MARIA_BIN/mysqladmin ping -u root --socket="$MARIA_SOCK_DIR/$MARIA_SOCK" --silent 2>/dev/null; then
+                          $MARIA_BIN/mariadbd --defaults-file=/dev/null --user=$USER --datadir="$MARIA_DIR" --socket="$MARIA_SOCK_DIR/$MARIA_SOCK" --port=3308 --bind-address=127.0.0.1 --pid-file="$MARIA_DIR/mariadb.pid" --console > "$MARIA_DIR/server.log" 2>&1 &
+                          maria_ready=0
+                          for i in $(seq 1 30); do
+                            if $MARIA_BIN/mysqladmin ping -u root --socket="$MARIA_SOCK_DIR/$MARIA_SOCK" --silent 2>/dev/null; then
+                              maria_ready=1
+                              break
+                            fi
+                            sleep 1
+                          done
+                          if [ "$maria_ready" -eq 1 ]; then
                             $MARIA_BIN/mariadb -u root --socket="$MARIA_SOCK_DIR/$MARIA_SOCK" -e "CREATE DATABASE IF NOT EXISTS testdb;" 2>/dev/null
                             echo "[auto] MariaDB (primary) started on port 3308"
                           else
-                            echo "[auto] MariaDB (primary) failed to start"
+                            echo "[auto] MariaDB (primary) failed to start; see $MARIA_DIR/server.log"
                           fi
                         else
                           echo "[auto] MariaDB (primary) already running"
@@ -221,13 +267,20 @@
                             mkdir -p "$MARIA2_DIR"
                             $MARIA_BIN/mariadb-install-db --user=$USER --datadir="$MARIA2_DIR" --auth-root-authentication-method=normal > /dev/null 2>&1
                           fi
-                          $MARIA_BIN/mariadbd --defaults-file=/dev/null --user=$USER --datadir="$MARIA2_DIR" --socket="$MARIA2_SOCK_DIR/$MARIA2_SOCK" --port=3309 --bind-address=127.0.0.1 --pid-file="$MARIA2_DIR/mariadb.pid" --daemonize > /dev/null 2>&1
-                          sleep 2
-                          if $MARIA_BIN/mysqladmin ping -u root --socket="$MARIA2_SOCK_DIR/$MARIA2_SOCK" --silent 2>/dev/null; then
+                          $MARIA_BIN/mariadbd --defaults-file=/dev/null --user=$USER --datadir="$MARIA2_DIR" --socket="$MARIA2_SOCK_DIR/$MARIA2_SOCK" --port=3309 --bind-address=127.0.0.1 --pid-file="$MARIA2_DIR/mariadb.pid" --console > "$MARIA2_DIR/server.log" 2>&1 &
+                          maria2_ready=0
+                          for i in $(seq 1 30); do
+                            if $MARIA_BIN/mysqladmin ping -u root --socket="$MARIA2_SOCK_DIR/$MARIA2_SOCK" --silent 2>/dev/null; then
+                              maria2_ready=1
+                              break
+                            fi
+                            sleep 1
+                          done
+                          if [ "$maria2_ready" -eq 1 ]; then
                             $MARIA_BIN/mariadb -u root --socket="$MARIA2_SOCK_DIR/$MARIA2_SOCK" -e "CREATE DATABASE IF NOT EXISTS testdb;" 2>/dev/null
                             echo "[auto] MariaDB (secondary) started on port 3309"
                           else
-                            echo "[auto] MariaDB (secondary) failed to start"
+                            echo "[auto] MariaDB (secondary) failed to start; see $MARIA2_DIR/server.log"
                           fi
                         else
                           echo "[auto] MariaDB (secondary) already running"
