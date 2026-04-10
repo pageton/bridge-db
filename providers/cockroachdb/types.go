@@ -1,6 +1,8 @@
 package cockroachdb
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -23,7 +25,9 @@ func encodeCockroachDBRow(row *cockroachDBRow) ([]byte, error) {
 
 func decodeCockroachDBRow(data []byte) (*cockroachDBRow, error) {
 	var row cockroachDBRow
-	if err := sonic.Unmarshal(data, &row); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&row); err != nil {
 		return nil, fmt.Errorf("decode cockroachdb row: %w", err)
 	}
 	return &row, nil
