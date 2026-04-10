@@ -187,6 +187,9 @@ func (t *SSHTunnel) buildSSHConfig() (*ssh.ClientConfig, error) {
 
 	var hostKeyCallback ssh.HostKeyCallback
 	if t.config.Insecure {
+		if os.Getenv("BRIDGE_ALLOW_INSECURE_SSH") != "1" {
+			return nil, fmt.Errorf("ssh insecure mode requires BRIDGE_ALLOW_INSECURE_SSH=1 environment variable to be set")
+		}
 		logger.L().Warn("ssh tunnel: host key verification disabled (insecure mode)")
 		hostKeyCallback = ssh.InsecureIgnoreHostKey()
 	} else {
@@ -431,6 +434,10 @@ func (t *SSHTunnel) reconnect() bool {
 	t.client = newClient
 	t.mu.Unlock()
 
+	// Signal old keepalive and forwarding goroutines to stop.
+	close(t.done)
+	t.done = make(chan struct{})
+
 	if oldListener != nil {
 		_ = oldListener.Close()
 	}
@@ -455,6 +462,9 @@ func (t *SSHTunnel) reconnect() bool {
 
 	// Restart forwarding goroutine
 	go t.forward()
+
+	// Restart keepalive for the new connection.
+	go t.keepalive()
 
 	log.Info("tunnel: reconnected successfully", "local_addr", t.localAddr)
 	return true
