@@ -3,10 +3,12 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/pageton/bridge-db/internal/config"
+	"github.com/pageton/bridge-db/pkg/provider"
 )
 
 var (
@@ -21,11 +23,18 @@ var (
 // rootCmd is the base command for the bridge CLI.
 var rootCmd = &cobra.Command{
 	Use:   "bridge",
-	Short: "Bridge-DB: Multi-database migration framework",
-	Long: `Bridge-DB is a client-only database migration tool that copies data
-between database instances. It supports Redis, MongoDB, PostgreSQL, MySQL,
-MariaDB, CockroachDB, MSSQL, and SQLite with optional SSH tunneling for
-databases behind firewalls.`,
+	Short: "Multi-database migration tool",
+	Long: `Bridge-DB copies data between database instances — same-engine
+(replication/cloning) or cross-engine (e.g. MySQL to Postgres).
+
+Supported providers:
+  SQL:       postgres, mysql, mariadb, cockroachdb, mssql, sqlite
+  NoSQL:     mongodb, redis                (requires build tag)
+
+Quick start:
+  bridge migrate --source-url postgres:// ... --dest-url mysql:// ...
+
+Use "bridge providers" to list providers compiled into this binary.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -45,6 +54,30 @@ func init() {
 			fmt.Printf("bridge %s\n", Version)
 		},
 	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "providers",
+		Short: "List available database providers",
+		Long: `List all database providers compiled into this binary.
+
+Providers are enabled at build time. Base providers (postgres, mysql,
+mariadb, cockroachdb) are always available. Additional providers are
+enabled via build tags:
+
+  bridge build -tags "mongodb,mssql,sqlite,redis"   # all providers
+  bridge build -tags "redis"                         # redis only`,
+		Run: func(cmd *cobra.Command, args []string) {
+			providers := provider.AvailableProviders()
+			if len(providers) == 0 {
+				fmt.Println("No providers registered.")
+				return
+			}
+			fmt.Printf("Available providers (%d):\n", len(providers))
+			for _, p := range providers {
+				fmt.Printf("  %s\n", p)
+			}
+		},
+	})
 }
 
 // SetVersion sets the version string (called from main via ldflags).
@@ -55,6 +88,22 @@ func SetVersion(v string) {
 // Execute runs the root command.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		// Provide actionable hints for common configuration errors.
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "source provider is required"):
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "  Hint: specify a source with --source-url or --source-provider")
+			fmt.Fprintln(os.Stderr, "  Example: --source-url postgres://user:pass@host:5432/db")
+		case strings.Contains(msg, "destination provider is required"):
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "  Hint: specify a destination with --dest-url or --dest-provider")
+			fmt.Fprintln(os.Stderr, "  Example: --dest-url mysql://user:pass@tcp(host:3306)/db")
+		case strings.Contains(msg, "unknown provider"):
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "  Hint: use \"bridge providers\" to see which providers are compiled in.")
+			fmt.Fprintln(os.Stderr, "  Heavy providers (mongodb, mssql, sqlite, redis) require build tags.")
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
