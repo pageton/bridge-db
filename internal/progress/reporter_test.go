@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pageton/bridge-db/internal/util"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
@@ -130,9 +131,9 @@ func TestHumanBytes(t *testing.T) {
 		{1536, "1.5 KiB"},
 	}
 	for _, tt := range tests {
-		got := humanBytes(tt.input)
+		got := util.HumanBytes(tt.input)
 		if got != tt.want {
-			t.Errorf("humanBytes(%d) = %q, want %q", tt.input, got, tt.want)
+			t.Errorf("HumanBytes(%d) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
 }
