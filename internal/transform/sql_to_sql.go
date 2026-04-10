@@ -1,6 +1,8 @@
 package transform
 
 import (
+	"encoding/json"
+
 	"github.com/bytedance/sonic"
 
 	"github.com/pageton/bridge-db/pkg/provider"
@@ -11,7 +13,7 @@ import (
 func AdjustSchemaField(units []provider.MigrationUnit, add bool, schemaName string) ([]provider.MigrationUnit, error) {
 	result := make([]provider.MigrationUnit, len(units))
 	for i, unit := range units {
-		var envelope map[string]any
+		var envelope map[string]json.RawMessage
 		if err := sonic.Unmarshal(unit.Data, &envelope); err != nil {
 			result[i] = unit
 			continue
@@ -19,7 +21,12 @@ func AdjustSchemaField(units []provider.MigrationUnit, add bool, schemaName stri
 
 		if add {
 			if _, ok := envelope["schema"]; !ok {
-				envelope["schema"] = schemaName
+				encodedSchema, err := sonic.Marshal(schemaName)
+				if err != nil {
+					result[i] = unit
+					continue
+				}
+				envelope["schema"] = encodedSchema
 			}
 		} else {
 			delete(envelope, "schema")
@@ -51,37 +58,52 @@ func ConvertTimestampColumns(units []provider.MigrationUnit, schema *provider.Sc
 
 	result := make([]provider.MigrationUnit, len(units))
 	for i, unit := range units {
-		var envelope map[string]any
+		var envelope map[string]json.RawMessage
 		if err := sonic.Unmarshal(unit.Data, &envelope); err != nil {
 			result[i] = unit
 			continue
 		}
 
-		data, ok := envelope["data"].(map[string]any)
+		dataRaw, ok := envelope["data"]
 		if !ok {
+			result[i] = unit
+			continue
+		}
+
+		var data map[string]json.RawMessage
+		if err := sonic.Unmarshal(dataRaw, &data); err != nil {
 			result[i] = unit
 			continue
 		}
 
 		changed := false
 		for _, col := range tsCols {
-			val, ok := data[col]
+			valRaw, ok := data[col]
 			if !ok {
 				continue
 			}
-			s, ok := val.(string)
-			if !ok {
+			var s string
+			if err := sonic.Unmarshal(valRaw, &s); err != nil {
 				continue
 			}
 			converted := ConvertTimestamp(s, srcDialect, dstDialect)
 			if converted != s {
-				data[col] = converted
+				encoded, err := sonic.Marshal(converted)
+				if err != nil {
+					continue
+				}
+				data[col] = encoded
 				changed = true
 			}
 		}
 
 		if changed {
-			envelope["data"] = data
+			encodedData, err := sonic.Marshal(data)
+			if err != nil {
+				result[i] = unit
+				continue
+			}
+			envelope["data"] = encodedData
 			encoded, err := sonic.Marshal(envelope)
 			if err != nil {
 				result[i] = unit

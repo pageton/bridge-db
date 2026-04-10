@@ -1,7 +1,9 @@
 package transform
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/bytedance/sonic"
@@ -194,7 +196,9 @@ func replaceSQLData(unit provider.MigrationUnit, data map[string]any) (provider.
 }
 
 func unmarshalEnvelope(data []byte, v any) error {
-	return sonic.Unmarshal(data, v)
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
 }
 
 func marshalEnvelope(v any) ([]byte, error) {
