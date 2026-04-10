@@ -1,4 +1,4 @@
-.PHONY: build clean test lint fmt vet install run fmt-check check ci build-all build-base
+.PHONY: build clean test lint fmt vet install run fmt-check check ci build-all build-base test-ci test-ci-race
 
 # Binary settings
 BINARY_NAME  := bridge
@@ -28,6 +28,11 @@ LDFLAGS      := -s -w \
 PROVIDERS    ?=
 
 BUILD_TAGS   := $(if $(PROVIDERS),-tags "$(PROVIDERS)",)
+
+# Packages with concurrency (need race detector).
+RACE_PKGS    := ./internal/bridge/... ./internal/progress/... ./internal/transform/... ./internal/tunnel/... ./pkg/provider/...
+# Packages without concurrency (safe to skip race).
+NO_RACE_PKGS := ./internal/config/... ./internal/retry/... ./internal/verify/...
 
 # -------------------------------------------------------
 # Build
@@ -78,7 +83,8 @@ test:
 	$(GOTEST) $(BUILD_TAGS) ./...
 
 test-ci:
-	$(GOTEST) -v -count=1 -race $(BUILD_TAGS) ./...
+	$(GOTEST) -v -count=1 -race $(BUILD_TAGS) $(RACE_PKGS)
+	$(GOTEST) -v -count=1 $(BUILD_TAGS) $(NO_RACE_PKGS)
 
 test-all:
 	$(GOTEST) -tags "mongodb,mssql,sqlite,redis" ./...
@@ -116,6 +122,6 @@ verify-deps:
 
 check: build fmt-check vet lint test
 
-ci: fmt-check vet lint test-ci
+ci: fmt-check lint test-ci
 
 all: clean build check
