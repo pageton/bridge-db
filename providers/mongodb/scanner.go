@@ -4,8 +4,9 @@ package mongodb
 
 import (
 	"context"
-	"github.com/bytedance/sonic"
 	"io"
+
+	"github.com/bytedance/sonic"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -37,11 +38,12 @@ func newMongoDBScanner(database *mongo.Database, opts provider.ScanOptions) *mon
 		log:      logger.L().With("component", "mongodb-scanner"),
 	}
 
-	// Parse resume token to skip already-scanned collections and documents.
+	// Parse resume token to restore stats for logging. Collection skipping
+	// is handled by TablesCompleted filtering below; we do NOT use
+	// TablesDone for index-based skipping (conflicts with name filtering).
 	if len(opts.ResumeToken) > 0 {
-		if stats, err := unmarshalScanToken(opts.ResumeToken); err == nil {
+		if stats, err := provider.UnmarshalScanToken(opts.ResumeToken); err == nil {
 			s.stats = stats
-			s.currentColl = stats.TablesDone
 			s.log.Info("resuming from checkpoint",
 				"collections_done", stats.TablesDone,
 				"collections_total", stats.TablesTotal,
@@ -226,11 +228,8 @@ func (s *mongoDBScanner) readDocument(collection string, cursor *mongo.Cursor) (
 		Table:    collection,
 		DataType: provider.DataTypeDocument,
 		Data:     data,
-		Metadata: map[string]any{
-			"collection":  collection,
-			"document_id": docID,
-		},
-		Size: int64(len(rawBytes)),
+		Meta:     provider.UnitMeta{},
+		Size:     int64(len(rawBytes)),
 	}, nil
 }
 
@@ -246,21 +245,4 @@ func formatDocumentID(id any) string {
 		b, _ := sonic.Marshal(v)
 		return string(b)
 	}
-}
-
-// unmarshalScanToken deserializes a resume token.
-func unmarshalScanToken(token []byte) (provider.ScanStats, error) {
-	if len(token) == 0 {
-		return provider.ScanStats{}, nil
-	}
-	var m map[string]int64
-	if err := sonic.Unmarshal(token, &m); err != nil {
-		return provider.ScanStats{}, err
-	}
-	return provider.ScanStats{
-		TotalScanned: m["total_scanned"],
-		TotalBytes:   m["total_bytes"],
-		TablesDone:   int(m["tables_done"]),
-		TablesTotal:  int(m["tables_total"]),
-	}, nil
 }

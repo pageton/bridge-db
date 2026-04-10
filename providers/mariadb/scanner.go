@@ -7,8 +7,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/bytedance/sonic"
-
 	"github.com/pageton/bridge-db/internal/logger"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
@@ -40,10 +38,12 @@ func newMariaDBScanner(db *sql.DB, opts provider.ScanOptions) *mariaDBScanner {
 		log:  logger.L().With("component", "mariadb-scanner"),
 	}
 
+	// Parse resume token to restore stats for logging. Table skipping is
+	// handled by TablesCompleted filtering below; we do NOT use TablesDone
+	// for index-based skipping (conflicts with name-based filtering).
 	if len(opts.ResumeToken) > 0 {
-		if stats, err := unmarshalScanToken(opts.ResumeToken); err == nil {
+		if stats, err := provider.UnmarshalScanToken(opts.ResumeToken); err == nil {
 			s.stats = stats
-			s.currentTable = stats.TablesDone
 			s.log.Info("resuming from checkpoint",
 				"tables_done", stats.TablesDone,
 				"tables_total", stats.TablesTotal,
@@ -273,7 +273,7 @@ func (s *mariaDBScanner) readRow(_ context.Context) (*provider.MigrationUnit, er
 		Table:    table,
 		DataType: provider.DataTypeRow,
 		Data:     rowData,
-		Metadata: map[string]any{"table": table, "primary_key": pk},
+		Meta:     provider.UnitMeta{PrimaryKey: pk, ColumnTypes: columnTypes},
 		Size:     int64(len(rowData)),
 	}, nil
 }
@@ -292,20 +292,4 @@ func convertValue(value any) any {
 
 func quoteIdentifier(s string) string {
 	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
-}
-
-func unmarshalScanToken(token []byte) (provider.ScanStats, error) {
-	if len(token) == 0 {
-		return provider.ScanStats{}, nil
-	}
-	var m map[string]int64
-	if err := sonic.Unmarshal(token, &m); err != nil {
-		return provider.ScanStats{}, err
-	}
-	return provider.ScanStats{
-		TotalScanned: m["total_scanned"],
-		TotalBytes:   m["total_bytes"],
-		TablesDone:   int(m["tables_done"]),
-		TablesTotal:  int(m["tables_total"]),
-	}, nil
 }

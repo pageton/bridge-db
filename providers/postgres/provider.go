@@ -56,7 +56,7 @@ func (p *PostgresProvider) Connect(ctx context.Context, srcConfig, dstConfig any
 		p.role = "source"
 	}
 
-	cfg, err := resolvePostgresConfig(raw)
+	cfg, err := config.ResolveConfig(raw, "postgres", postgresConfigFromMap)
 	if err != nil {
 		return fmt.Errorf("postgres %s: %w", p.role, err)
 	}
@@ -135,6 +135,135 @@ func (p *PostgresProvider) DryRun() provider.Provider {
 	return &dryRunProvider{inner: p}
 }
 
+// Capabilities declares what the postgres provider supports.
+func (p *PostgresProvider) Capabilities() provider.Capabilities {
+	return provider.Capabilities{Schema: true, Transactions: true, Verification: provider.VerifyCross, Incremental: true}
+}
+
+// EnumerateTables returns table names and their row counts.
+func (p *PostgresProvider) EnumerateTables(ctx context.Context) (map[string]int64, error) {
+	p.mu.Lock()
+	pool := p.pool
+	p.mu.Unlock()
+
+	if pool == nil {
+		return nil, fmt.Errorf("postgres %s: not connected", p.role)
+	}
+
+	query := `
+		SELECT table_schema, table_name
+		FROM information_schema.tables
+		WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+		AND table_type = 'BASE TABLE'
+	`
+
+	rows, err := pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]int64)
+	for rows.Next() {
+		var schema, table string
+		if err := rows.Scan(&schema, &table); err != nil {
+			continue
+		}
+		fqn := schema + "." + table
+
+		var count int64
+		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s",
+			quoteIdentifier(schema), quoteIdentifier(table))
+		if err := pool.QueryRow(ctx, countQuery).Scan(&count); err != nil {
+			continue
+		}
+		result[fqn] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("enumerate tables: %w", err)
+	}
+	return result, nil
+}
+
+// ReadRecords reads specific rows by their keys.
+// Keys are in the format "schema.table:primaryKey".
+func (p *PostgresProvider) ReadRecords(ctx context.Context, keys []string) (map[string]map[string]any, error) {
+	p.mu.Lock()
+	pool := p.pool
+	p.mu.Unlock()
+
+	if pool == nil {
+		return nil, fmt.Errorf("postgres %s: not connected", p.role)
+	}
+
+	result := make(map[string]map[string]any, len(keys))
+	for _, key := range keys {
+		schema, table, pk, err := parseRowKey(key)
+		if err != nil {
+			continue
+		}
+		pk = resolvePrimaryKeyMap(ctx, pool, schema, table, pk)
+
+		whereClause, whereArgs := buildPKWhere(pk, 1)
+		query := fmt.Sprintf("SELECT * FROM %s.%s WHERE %s",
+			quoteIdentifier(schema), quoteIdentifier(table), whereClause)
+
+		rows, err := pool.Query(ctx, query, whereArgs...)
+		if err != nil {
+			continue
+		}
+
+		fields := rows.FieldDescriptions()
+		if rows.Next() {
+			values, err := rows.Values()
+			if err != nil {
+				rows.Close()
+				continue
+			}
+			row := make(map[string]any, len(fields))
+			for i, fd := range fields {
+				row[fd.Name] = values[i]
+			}
+			result[key] = row
+		}
+		rows.Close()
+	}
+	return result, nil
+}
+
+// ComputeChecksums returns MD5 checksums for the given keys.
+func (p *PostgresProvider) ComputeChecksums(ctx context.Context, keys []string) (map[string]string, error) {
+	p.mu.Lock()
+	pool := p.pool
+	p.mu.Unlock()
+
+	if pool == nil {
+		return nil, fmt.Errorf("postgres %s: not connected", p.role)
+	}
+
+	result := make(map[string]string, len(keys))
+	for _, key := range keys {
+		schema, table, pk, err := parseRowKey(key)
+		if err != nil {
+			continue
+		}
+		pk = resolvePrimaryKeyMap(ctx, pool, schema, table, pk)
+
+		whereClause, whereArgs := buildPKWhere(pk, 1)
+		query := fmt.Sprintf(
+			"SELECT md5(row_to_json(t)::text) FROM (SELECT * FROM %s.%s WHERE %s) t",
+			quoteIdentifier(schema), quoteIdentifier(table), whereClause,
+		)
+
+		var hash string
+		if err := pool.QueryRow(ctx, query, whereArgs...).Scan(&hash); err != nil {
+			continue
+		}
+		result[key] = hash
+	}
+	return result, nil
+}
+
 // Pool returns the underlying PostgreSQL connection pool (for internal use by sub-components).
 func (p *PostgresProvider) Pool() *pgxpool.Pool {
 	p.mu.Lock()
@@ -146,26 +275,6 @@ func (p *PostgresProvider) Pool() *pgxpool.Pool {
 // Config resolution
 // ---------------------------------------------------------------------------
 
-// resolvePostgresConfig handles both direct config and tunnel-resolved address.
-func resolvePostgresConfig(raw any) (*config.PostgresConfig, error) {
-	switch v := raw.(type) {
-	case *config.PostgresConfig:
-		if v == nil {
-			return nil, fmt.Errorf("nil postgres config")
-		}
-		return v, nil
-
-	case config.PostgresConfig:
-		return &v, nil
-
-	case map[string]string:
-		return postgresConfigFromMap(v)
-
-	default:
-		return nil, fmt.Errorf("unsupported postgres config type: %T", raw)
-	}
-}
-
 // postgresConfigFromMap builds a PostgresConfig from a tunnel-resolved address map.
 func postgresConfigFromMap(m map[string]string) (*config.PostgresConfig, error) {
 	addr := m["tunnel_addr"]
@@ -173,7 +282,7 @@ func postgresConfigFromMap(m map[string]string) (*config.PostgresConfig, error) 
 		return nil, fmt.Errorf("missing tunnel_addr in config map")
 	}
 
-	host, portStr, err := parseHostPort(addr)
+	host, portStr, err := provider.ParseHostPort(addr, 5432)
 	if err != nil {
 		return nil, fmt.Errorf("invalid tunnel address %q: %w", addr, err)
 	}
@@ -195,52 +304,6 @@ func postgresConfigFromMap(m map[string]string) (*config.PostgresConfig, error) 
 	return &cfg, nil
 }
 
-// parseHostPort parses a host:port string.
-func parseHostPort(addr string) (string, int, error) {
-	if len(addr) == 0 {
-		return "", 0, fmt.Errorf("empty address")
-	}
-
-	var host string
-	var port int
-
-	if addr[0] == '[' {
-		// IPv6 format: [::1]:5432
-		end := -1
-		for i := 1; i < len(addr); i++ {
-			if addr[i] == ']' {
-				end = i
-				break
-			}
-		}
-		if end == -1 {
-			return "", 0, fmt.Errorf("invalid IPv6 address")
-		}
-		host = addr[1:end]
-		if end+1 < len(addr) && addr[end+1] == ':' {
-			_, _ = fmt.Sscanf(addr[end+2:], "%d", &port)
-		}
-	} else {
-		// IPv4 or hostname
-		for i := len(addr) - 1; i >= 0; i-- {
-			if addr[i] == ':' {
-				host = addr[:i]
-				_, _ = fmt.Sscanf(addr[i+1:], "%d", &port)
-				break
-			}
-		}
-		if host == "" {
-			host = addr
-		}
-	}
-
-	if port == 0 {
-		port = 5432
-	}
-
-	return host, port, nil
-}
-
 // buildPostgresConnStr constructs a PostgreSQL connection string from config.
 func buildPostgresConnStr(cfg *config.PostgresConfig) string {
 	connStr := fmt.Sprintf("host=%s port=%d", cfg.Host, cfg.Port)
@@ -259,6 +322,56 @@ func buildPostgresConnStr(cfg *config.PostgresConfig) string {
 	}
 
 	return connStr
+}
+
+func resolvePrimaryKeyMap(ctx context.Context, pool *pgxpool.Pool, schema, table string, pk map[string]any) map[string]any {
+	if pool == nil {
+		return pk
+	}
+	if len(pk) != 1 {
+		return pk
+	}
+	val, ok := pk["id"]
+	if !ok {
+		return pk
+	}
+
+	pkColumns, err := queryPrimaryKeyColumns(ctx, pool, schema, table)
+	if err != nil || len(pkColumns) != 1 || pkColumns[0] == "id" {
+		return pk
+	}
+
+	return map[string]any{pkColumns[0]: val}
+}
+
+func queryPrimaryKeyColumns(ctx context.Context, pool *pgxpool.Pool, schema, table string) ([]string, error) {
+	const pkQuery = `
+		SELECT kcu.column_name
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+			AND tc.table_schema = $1
+			AND tc.table_name = $2
+		ORDER BY kcu.ordinal_position
+	`
+
+	rows, err := pool.Query(ctx, pkQuery, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pkColumns []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			continue
+		}
+		pkColumns = append(pkColumns, col)
+	}
+	return pkColumns, rows.Err()
 }
 
 // ---------------------------------------------------------------------------

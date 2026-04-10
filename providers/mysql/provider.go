@@ -5,8 +5,12 @@ package mysql
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -57,7 +61,7 @@ func (p *MySQLProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 		p.role = "source"
 	}
 
-	cfg, err := resolveMySQLConfig(raw)
+	cfg, err := config.ResolveConfig(raw, "mysql", mysqlConfigFromMap)
 	if err != nil {
 		return fmt.Errorf("mysql %s: %w", p.role, err)
 	}
@@ -131,9 +135,176 @@ func (p *MySQLProvider) SchemaMigrator(ctx context.Context) provider.SchemaMigra
 	return newMySQLSchemaMigrator(p.db)
 }
 
+// EnumerateTables returns table names and their row counts.
+func (p *MySQLProvider) EnumerateTables(ctx context.Context) (map[string]int64, error) {
+	p.mu.Lock()
+	db := p.db
+	p.mu.Unlock()
+
+	if db == nil {
+		return nil, fmt.Errorf("mysql %s: not connected", p.role)
+	}
+
+	rows, err := db.QueryContext(ctx, "SHOW TABLES")
+	if err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string]int64)
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			continue
+		}
+
+		var count int64
+		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s", quoteIdentifier(table))
+		if err := db.QueryRowContext(ctx, countQuery).Scan(&count); err != nil {
+			continue
+		}
+		result[table] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("enumerate tables: %w", err)
+	}
+	return result, nil
+}
+
+// ReadRecords reads specific rows by their keys.
+// Keys are in the format "table:primaryKey".
+func (p *MySQLProvider) ReadRecords(ctx context.Context, keys []string) (map[string]map[string]any, error) {
+	p.mu.Lock()
+	db := p.db
+	p.mu.Unlock()
+
+	if db == nil {
+		return nil, fmt.Errorf("mysql %s: not connected", p.role)
+	}
+
+	result := make(map[string]map[string]any, len(keys))
+	for _, key := range keys {
+		table, pk, err := parseRowKey(key)
+		if err != nil {
+			continue
+		}
+
+		whereClause, whereArgs := buildPKWhere(pk, 1)
+		query := fmt.Sprintf("SELECT * FROM %s WHERE %s",
+			quoteIdentifier(table), whereClause)
+
+		rows, err := db.QueryContext(ctx, query, whereArgs...)
+		if err != nil {
+			continue
+		}
+
+		cols, err := rows.Columns()
+		if err != nil {
+			_ = rows.Close()
+			continue
+		}
+
+		colPtrs := make([]any, len(cols))
+		colVals := make([]any, len(cols))
+		for i := range colPtrs {
+			colPtrs[i] = &colVals[i]
+		}
+
+		if rows.Next() {
+			if err := rows.Scan(colPtrs...); err != nil {
+				_ = rows.Close()
+				continue
+			}
+			row := make(map[string]any, len(cols))
+			for i, col := range cols {
+				row[col] = colVals[i]
+			}
+			result[key] = row
+		}
+		_ = rows.Close()
+	}
+	return result, nil
+}
+
+// ComputeChecksums returns MD5 checksums for the given keys.
+// Keys are in the format "table:primaryKey".
+func (p *MySQLProvider) ComputeChecksums(ctx context.Context, keys []string) (map[string]string, error) {
+	p.mu.Lock()
+	db := p.db
+	p.mu.Unlock()
+
+	if db == nil {
+		return nil, fmt.Errorf("mysql %s: not connected", p.role)
+	}
+
+	result := make(map[string]string, len(keys))
+	for _, key := range keys {
+		table, pk, err := parseRowKey(key)
+		if err != nil {
+			continue
+		}
+
+		whereClause, whereArgs := buildPKWhere(pk, 1)
+		query := fmt.Sprintf("SELECT * FROM %s WHERE %s",
+			quoteIdentifier(table), whereClause)
+
+		rows, err := db.QueryContext(ctx, query, whereArgs...)
+		if err != nil {
+			continue
+		}
+
+		cols, err := rows.Columns()
+		if err != nil {
+			_ = rows.Close()
+			continue
+		}
+
+		colPtrs := make([]any, len(cols))
+		colVals := make([]any, len(cols))
+		for i := range colPtrs {
+			colPtrs[i] = &colVals[i]
+		}
+
+		if rows.Next() {
+			if err := rows.Scan(colPtrs...); err != nil {
+				_ = rows.Close()
+				continue
+			}
+
+			// Sort column names for deterministic hashing.
+			sortedCols := make([]string, len(cols))
+			copy(sortedCols, cols)
+			sort.Strings(sortedCols)
+
+			var buf strings.Builder
+			for i, col := range sortedCols {
+				if i > 0 {
+					buf.WriteByte('|')
+				}
+				// Find the index in the original cols slice for this sorted name.
+				for j, c := range cols {
+					if c == col {
+						fmt.Fprintf(&buf, "%v", colVals[j])
+						break
+					}
+				}
+			}
+			hash := sha256.Sum256([]byte(buf.String()))
+			result[key] = hex.EncodeToString(hash[:])
+		}
+		_ = rows.Close()
+	}
+	return result, nil
+}
+
 // DryRun returns a wrapped Provider that logs writes without executing them.
 func (p *MySQLProvider) DryRun() provider.Provider {
 	return &dryRunProvider{inner: p}
+}
+
+// Capabilities declares what the mysql provider supports.
+func (p *MySQLProvider) Capabilities() provider.Capabilities {
+	return provider.Capabilities{Schema: true, Transactions: true, Verification: provider.VerifyCross, Incremental: true}
 }
 
 // DB returns the underlying MySQL database connection (for internal use by sub-components).
@@ -147,26 +318,6 @@ func (p *MySQLProvider) DB() *sql.DB {
 // Config resolution
 // ---------------------------------------------------------------------------
 
-// resolveMySQLConfig handles both direct config and tunnel-resolved address.
-func resolveMySQLConfig(raw any) (*config.MySQLConfig, error) {
-	switch v := raw.(type) {
-	case *config.MySQLConfig:
-		if v == nil {
-			return nil, fmt.Errorf("nil mysql config")
-		}
-		return v, nil
-
-	case config.MySQLConfig:
-		return &v, nil
-
-	case map[string]string:
-		return mysqlConfigFromMap(v)
-
-	default:
-		return nil, fmt.Errorf("unsupported mysql config type: %T", raw)
-	}
-}
-
 // mysqlConfigFromMap builds a MySQLConfig from a tunnel-resolved address map.
 func mysqlConfigFromMap(m map[string]string) (*config.MySQLConfig, error) {
 	addr := m["tunnel_addr"]
@@ -174,7 +325,7 @@ func mysqlConfigFromMap(m map[string]string) (*config.MySQLConfig, error) {
 		return nil, fmt.Errorf("missing tunnel_addr in config map")
 	}
 
-	host, portStr, err := parseHostPort(addr)
+	host, portStr, err := provider.ParseHostPort(addr, 3306)
 	if err != nil {
 		return nil, fmt.Errorf("invalid tunnel address %q: %w", addr, err)
 	}
@@ -196,75 +347,7 @@ func mysqlConfigFromMap(m map[string]string) (*config.MySQLConfig, error) {
 	return &cfg, nil
 }
 
-// parseHostPort parses a host:port string.
-func parseHostPort(addr string) (string, int, error) {
-	if len(addr) == 0 {
-		return "", 0, fmt.Errorf("empty address")
-	}
-
-	var host string
-	var port int
-
-	if addr[0] == '[' {
-		// IPv6 format: [::1]:3306
-		end := -1
-		for i := 1; i < len(addr); i++ {
-			if addr[i] == ']' {
-				end = i
-				break
-			}
-		}
-		if end == -1 {
-			return "", 0, fmt.Errorf("invalid IPv6 address")
-		}
-		host = addr[1:end]
-		if end+1 < len(addr) && addr[end+1] == ':' {
-			_, _ = fmt.Sscanf(addr[end+2:], "%d", &port)
-		}
-	} else {
-		// IPv4 or hostname
-		for i := len(addr) - 1; i >= 0; i-- {
-			if addr[i] == ':' {
-				host = addr[:i]
-				_, _ = fmt.Sscanf(addr[i+1:], "%d", &port)
-				break
-			}
-		}
-		if host == "" {
-			host = addr
-		}
-	}
-
-	if port == 0 {
-		port = 3306
-	}
-
-	return host, port, nil
-}
-
 // buildMySQLDSN constructs a MySQL DSN from config.
 func buildMySQLDSN(cfg *config.MySQLConfig) string {
-	dsn := ""
-
-	if cfg.Username != "" {
-		dsn += cfg.Username
-		if cfg.Password != "" {
-			dsn += ":" + cfg.Password
-		}
-		dsn += "@"
-	}
-
-	if cfg.IsUnixSocket() {
-		dsn += fmt.Sprintf("unix(%s)", cfg.Host)
-	} else {
-		dsn += fmt.Sprintf("tcp(%s:%d)", cfg.Host, cfg.Port)
-	}
-
-	if cfg.Database != "" {
-		dsn += "/" + cfg.Database
-	}
-
-	dsn += "?parseTime=true&multiStatements=true"
-
-	return dsn
+	return cfg.DSNWithPassword() + "?parseTime=true&multiStatements=true"
 }

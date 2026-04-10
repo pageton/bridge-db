@@ -98,11 +98,11 @@ func (w *mariaDBWriter) writeWithUpsert(ctx context.Context, table string, colum
 	}
 	updateClauses := make([]string, len(columns))
 	for i, col := range columns {
-		updateClauses[i] = fmt.Sprintf("%s = new.%s", quoteIdentifier(col), quoteIdentifier(col))
+		updateClauses[i] = fmt.Sprintf("%s = VALUES(%s)", quoteIdentifier(col), quoteIdentifier(col))
 	}
 	queryPrefix := fmt.Sprintf("INSERT INTO %s (%s) VALUES ",
 		quoteIdentifier(table), strings.Join(quotedColumns, ", "))
-	querySuffix := fmt.Sprintf(" AS new ON DUPLICATE KEY UPDATE %s", strings.Join(updateClauses, ", "))
+	querySuffix := fmt.Sprintf(" ON DUPLICATE KEY UPDATE %s", strings.Join(updateClauses, ", "))
 	rowPlaceholder := "(" + buildPlaceholders(len(columns)) + ")"
 
 	for i := 0; i < len(rows); {

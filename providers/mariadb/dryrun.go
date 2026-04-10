@@ -42,6 +42,11 @@ func (d *dryRunProvider) SchemaMigrator(ctx context.Context) provider.SchemaMigr
 
 func (d *dryRunProvider) DryRun() provider.Provider { return d }
 
+// Capabilities returns the inner provider's capabilities.
+func (d *dryRunProvider) Capabilities() provider.Capabilities {
+	return d.inner.Capabilities()
+}
+
 type dryRunWriter struct {
 	opts provider.WriteOptions
 	log  interface{ Info(msg string, args ...any) }

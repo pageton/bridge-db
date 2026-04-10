@@ -4,8 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/bytedance/sonic"
 	"strings"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/pageton/bridge-db/internal/logger"
 	"github.com/pageton/bridge-db/pkg/provider"

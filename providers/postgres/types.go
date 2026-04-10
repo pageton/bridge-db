@@ -2,8 +2,9 @@ package postgres
 
 import (
 	"fmt"
-	"github.com/bytedance/sonic"
 	"time"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )

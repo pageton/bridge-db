@@ -3,8 +3,9 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"github.com/bytedance/sonic"
 	"strings"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 

@@ -223,11 +223,8 @@ func (s *redisScanner) readKey(ctx context.Context, key string) (*provider.Migra
 		Key:      key,
 		DataType: dataType,
 		Data:     data,
-		Metadata: map[string]any{
-			"ttl_seconds": ttlSeconds,
-			"redis_type":  keyType,
-		},
-		Size: size,
+		Meta:     provider.UnitMeta{TTL: ttlSeconds},
+		Size:     size,
 	}, nil
 }
 

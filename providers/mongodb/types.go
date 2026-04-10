@@ -3,7 +3,9 @@
 package mongodb
 
 import (
+	"encoding/base64"
 	"fmt"
+
 	"github.com/bytedance/sonic"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -37,6 +39,7 @@ func encodeMongoDocument(doc *mongoDocument) ([]byte, error) {
 		"collection":  doc.Collection,
 		"document_id": doc.DocumentID,
 		"document":    docMap,
+		"document_bson": []byte(doc.Data),
 	}
 
 	return sonic.Marshal(envelope)
@@ -51,12 +54,33 @@ func decodeMongoDocument(data []byte) (*mongoDocument, error) {
 
 	collection, _ := envelope["collection"].(string)
 	documentID := envelope["document_id"]
+	documentID = normalizeMongoDocumentID(documentID)
+	if raw, ok := envelope["document_bson"].(string); ok && raw != "" {
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			return nil, fmt.Errorf("decode document_bson: %w", err)
+		}
+		return &mongoDocument{
+			Collection: collection,
+			DocumentID: documentID,
+			Data:       bson.Raw(decoded),
+		}, nil
+	}
+	if raw, ok := envelope["document_bson"].([]byte); ok && len(raw) > 0 {
+		return &mongoDocument{
+			Collection: collection,
+			DocumentID: documentID,
+			Data:       bson.Raw(raw),
+		}, nil
+	}
 
-	// Re-encode the document to BSON
 	// Re-encode the document to BSON
 	docMap, ok := envelope["document"].(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("invalid document format")
+	}
+	if _, hasID := docMap["_id"]; hasID {
+		docMap["_id"] = documentID
 	}
 
 	docBytes, err := bson.Marshal(docMap)
@@ -69,6 +93,18 @@ func decodeMongoDocument(data []byte) (*mongoDocument, error) {
 		DocumentID: documentID,
 		Data:       docBytes,
 	}, nil
+}
+
+func normalizeMongoDocumentID(id any) any {
+	s, ok := id.(string)
+	if !ok || len(s) != 24 {
+		return id
+	}
+	objID, err := bson.ObjectIDFromHex(s)
+	if err != nil {
+		return id
+	}
+	return objID
 }
 
 // extractDocumentID extracts the _id field from a BSON document.

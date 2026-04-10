@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/bytedance/sonic"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -45,10 +44,12 @@ func newCockroachDBScanner(pool *pgxpool.Pool, opts provider.ScanOptions) *cockr
 		opts: opts,
 		log:  logger.L().With("component", "cockroachdb-scanner"),
 	}
+	// Parse resume token to restore stats for logging. Table skipping is
+	// handled by TablesCompleted filtering below; we do NOT use TablesDone
+	// for index-based skipping (conflicts with name-based filtering).
 	if len(opts.ResumeToken) > 0 {
-		if stats, err := unmarshalScanToken(opts.ResumeToken); err == nil {
+		if stats, err := provider.UnmarshalScanToken(opts.ResumeToken); err == nil {
 			s.stats = stats
-			s.currentTable = stats.TablesDone
 			s.log.Info("resuming from checkpoint",
 				"tables_done", stats.TablesDone,
 				"tables_total", stats.TablesTotal,
@@ -280,25 +281,11 @@ func (s *cockroachDBScanner) readRow(_ context.Context) (*provider.MigrationUnit
 	key := buildRowKey(table.Schema, table.Name, pk)
 	return &provider.MigrationUnit{
 		Key: key, Table: table.Name, DataType: provider.DataTypeRow,
-		Data: rowData, Metadata: map[string]any{"schema": table.Schema, "table": table.Name, "primary_key": pk},
+		Data: rowData, Meta: provider.UnitMeta{Schema: table.Schema, PrimaryKey: pk, ColumnTypes: columnTypes},
 		Size: int64(len(rowData)),
 	}, nil
 }
 
 func quoteIdentifier(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
-
-func unmarshalScanToken(token []byte) (provider.ScanStats, error) {
-	if len(token) == 0 {
-		return provider.ScanStats{}, nil
-	}
-	var m map[string]int64
-	if err := sonic.Unmarshal(token, &m); err != nil {
-		return provider.ScanStats{}, err
-	}
-	return provider.ScanStats{
-		TotalScanned: m["total_scanned"], TotalBytes: m["total_bytes"],
-		TablesDone: int(m["tables_done"]), TablesTotal: int(m["tables_total"]),
-	}, nil
 }

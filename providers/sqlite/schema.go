@@ -146,7 +146,6 @@ func (m *sqliteSchemaMigrator) getTableIndexes(ctx context.Context, table string
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
 
 	var indexes []struct {
 		name    string
@@ -214,6 +213,10 @@ func (m *sqliteSchemaMigrator) getTableIndexes(ctx context.Context, table string
 }
 
 func (m *sqliteSchemaMigrator) createTable(ctx context.Context, table provider.TableSchema, mapper provider.TypeMapper) error {
+	if len(table.Columns) == 0 {
+		return fmt.Errorf("create table %s: no column definitions in schema (source may be schemaless)", table.Name)
+	}
+
 	columnDefs := make([]string, len(table.Columns))
 	for i, col := range table.Columns {
 		colType := col.Type

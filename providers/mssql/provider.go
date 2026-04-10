@@ -4,8 +4,12 @@ package mssql
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	_ "github.com/microsoft/go-mssqldb"
@@ -44,7 +48,7 @@ func (p *MSSQLProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 		p.role = "source"
 	}
 
-	cfg, err := resolveMSSQLConfig(raw)
+	cfg, err := config.ResolveConfig(raw, "mssql", mssqlConfigFromMap)
 	if err != nil {
 		return fmt.Errorf("mssql %s: %w", p.role, err)
 	}
@@ -111,29 +115,174 @@ func (p *MSSQLProvider) DryRun() provider.Provider {
 	return &dryRunProvider{inner: p}
 }
 
+// Capabilities declares what the mssql provider supports.
+func (p *MSSQLProvider) Capabilities() provider.Capabilities {
+	return provider.Capabilities{Schema: true, Transactions: true, Verification: provider.VerifyCross, Incremental: true}
+}
+
+// EnumerateTables returns table names and their row counts.
+func (p *MSSQLProvider) EnumerateTables(ctx context.Context) (map[string]int64, error) {
+	p.mu.Lock()
+	db := p.db
+	p.mu.Unlock()
+
+	if db == nil {
+		return nil, fmt.Errorf("mssql %s: not connected", p.role)
+	}
+
+	query := "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'"
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list tables: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]int64)
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			continue
+		}
+
+		countQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s", quoteIdentifier(table))
+		var count int64
+		if err := db.QueryRowContext(ctx, countQuery).Scan(&count); err != nil {
+			continue
+		}
+		result[table] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("enumerate tables: %w", err)
+	}
+	return result, nil
+}
+
+// ReadRecords reads specific rows by their keys.
+// Keys are in the format "table:primaryKey".
+func (p *MSSQLProvider) ReadRecords(ctx context.Context, keys []string) (map[string]map[string]any, error) {
+	p.mu.Lock()
+	db := p.db
+	p.mu.Unlock()
+
+	if db == nil {
+		return nil, fmt.Errorf("mssql %s: not connected", p.role)
+	}
+
+	result := make(map[string]map[string]any, len(keys))
+	for _, key := range keys {
+		table, pk, err := parseRowKey(key)
+		if err != nil {
+			continue
+		}
+
+		whereClauses := make([]string, 0, len(pk))
+		whereArgs := make([]any, 0, len(pk))
+		for col, val := range pk {
+			whereClauses = append(whereClauses, fmt.Sprintf("%s = @p%d", quoteIdentifier(col), len(whereArgs)+1))
+			whereArgs = append(whereArgs, val)
+		}
+
+		query := fmt.Sprintf("SELECT * FROM %s WHERE %s",
+			quoteIdentifier(table), strings.Join(whereClauses, " AND "))
+
+		rows, err := db.QueryContext(ctx, query, whereArgs...)
+		if err != nil {
+			continue
+		}
+
+		cols, _ := rows.Columns()
+		colPtrs := make([]any, len(cols))
+		colVals := make([]any, len(cols))
+		for i := range colPtrs {
+			colPtrs[i] = &colVals[i]
+		}
+
+		if rows.Next() {
+			if err := rows.Scan(colPtrs...); err != nil {
+				_ = rows.Close()
+				continue
+			}
+			row := make(map[string]any, len(cols))
+			for i, col := range cols {
+				row[col] = colVals[i]
+			}
+			result[key] = row
+		}
+		_ = rows.Close()
+	}
+	return result, nil
+}
+
+// ComputeChecksums returns MD5 checksums for the given keys.
+// MSSQL's HASHBYTES has input length limits, so hashing is done in Go.
+func (p *MSSQLProvider) ComputeChecksums(ctx context.Context, keys []string) (map[string]string, error) {
+	p.mu.Lock()
+	db := p.db
+	p.mu.Unlock()
+
+	if db == nil {
+		return nil, fmt.Errorf("mssql %s: not connected", p.role)
+	}
+
+	result := make(map[string]string, len(keys))
+	for _, key := range keys {
+		table, pk, err := parseRowKey(key)
+		if err != nil {
+			continue
+		}
+
+		whereClauses := make([]string, 0, len(pk))
+		whereArgs := make([]any, 0, len(pk))
+		for col, val := range pk {
+			whereClauses = append(whereClauses, fmt.Sprintf("%s = @p%d", quoteIdentifier(col), len(whereArgs)+1))
+			whereArgs = append(whereArgs, val)
+		}
+
+		query := fmt.Sprintf("SELECT * FROM %s WHERE %s",
+			quoteIdentifier(table), strings.Join(whereClauses, " AND "))
+
+		rows, err := db.QueryContext(ctx, query, whereArgs...)
+		if err != nil {
+			continue
+		}
+
+		cols, _ := rows.Columns()
+		colPtrs := make([]any, len(cols))
+		colVals := make([]any, len(cols))
+		for i := range colPtrs {
+			colPtrs[i] = &colVals[i]
+		}
+
+		if rows.Next() {
+			if err := rows.Scan(colPtrs...); err != nil {
+				_ = rows.Close()
+				continue
+			}
+			sortedCols := make([]string, len(cols))
+			copy(sortedCols, cols)
+			sort.Strings(sortedCols)
+
+			var buf strings.Builder
+			for _, col := range sortedCols {
+				for i, c := range cols {
+					if c == col {
+						fmt.Fprintf(&buf, "%v", colVals[i])
+						break
+					}
+				}
+			}
+			hash := sha256.Sum256([]byte(buf.String()))
+			result[key] = hex.EncodeToString(hash[:])
+		}
+		_ = rows.Close()
+	}
+	return result, nil
+}
+
 func (p *MSSQLProvider) DB() *sql.DB {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.db
-}
-
-func resolveMSSQLConfig(raw any) (*config.MSSQLConfig, error) {
-	switch v := raw.(type) {
-	case *config.MSSQLConfig:
-		if v == nil {
-			return nil, fmt.Errorf("nil mssql config")
-		}
-		return v, nil
-
-	case config.MSSQLConfig:
-		return &v, nil
-
-	case map[string]string:
-		return mssqlConfigFromMap(v)
-
-	default:
-		return nil, fmt.Errorf("unsupported mssql config type: %T", raw)
-	}
 }
 
 func mssqlConfigFromMap(m map[string]string) (*config.MSSQLConfig, error) {
@@ -142,7 +291,7 @@ func mssqlConfigFromMap(m map[string]string) (*config.MSSQLConfig, error) {
 		return nil, fmt.Errorf("missing tunnel_addr in config map")
 	}
 
-	host, port, err := parseHostPort(addr)
+	host, port, err := provider.ParseHostPort(addr, 1433)
 	if err != nil {
 		return nil, fmt.Errorf("invalid tunnel address %q: %w", addr, err)
 	}
@@ -161,49 +310,6 @@ func mssqlConfigFromMap(m map[string]string) (*config.MSSQLConfig, error) {
 	return &cfg, nil
 }
 
-func parseHostPort(addr string) (string, int, error) {
-	if len(addr) == 0 {
-		return "", 0, fmt.Errorf("empty address")
-	}
-
-	var host string
-	var port int
-
-	if addr[0] == '[' {
-		end := -1
-		for i := 1; i < len(addr); i++ {
-			if addr[i] == ']' {
-				end = i
-				break
-			}
-		}
-		if end == -1 {
-			return "", 0, fmt.Errorf("invalid IPv6 address")
-		}
-		host = addr[1:end]
-		if end+1 < len(addr) && addr[end+1] == ':' {
-			_, _ = fmt.Sscanf(addr[end+2:], "%d", &port)
-		}
-	} else {
-		for i := len(addr) - 1; i >= 0; i-- {
-			if addr[i] == ':' {
-				host = addr[:i]
-				_, _ = fmt.Sscanf(addr[i+1:], "%d", &port)
-				break
-			}
-		}
-		if host == "" {
-			host = addr
-		}
-	}
-
-	if port == 0 {
-		port = 1433
-	}
-
-	return host, port, nil
-}
-
 func buildMSSQLDSN(cfg *config.MSSQLConfig) string {
-	return cfg.DSN()
+	return cfg.DSNWithPassword()
 }

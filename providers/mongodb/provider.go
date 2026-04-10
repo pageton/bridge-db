@@ -7,11 +7,18 @@ package mongodb
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
+	"github.com/bytedance/sonic"
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
@@ -62,7 +69,7 @@ func (p *MongoDBProvider) Connect(_ context.Context, srcConfig, dstConfig any) e
 		p.role = "source"
 	}
 
-	cfg, err := resolveMongoDBConfig(raw)
+	cfg, err := config.ResolveConfig(raw, "mongodb", mongoDBConfigFromMap)
 	if err != nil {
 		return fmt.Errorf("mongodb %s: %w", p.role, err)
 	}
@@ -141,6 +148,11 @@ func (p *MongoDBProvider) DryRun() provider.Provider {
 	return &dryRunProvider{inner: p}
 }
 
+// Capabilities declares what the mongodb provider supports.
+func (p *MongoDBProvider) Capabilities() provider.Capabilities {
+	return provider.Capabilities{Schema: true, Transactions: true, Verification: provider.VerifyCross, Incremental: true}
+}
+
 // Database returns the underlying MongoDB database (for internal use by sub-components).
 func (p *MongoDBProvider) Database() *mongo.Database {
 	p.mu.Lock()
@@ -149,28 +161,176 @@ func (p *MongoDBProvider) Database() *mongo.Database {
 }
 
 // ---------------------------------------------------------------------------
-// Config resolution
+// Cross-verification interfaces
 // ---------------------------------------------------------------------------
 
-// resolveMongoDBConfig handles both direct config and tunnel-resolved address.
-func resolveMongoDBConfig(raw any) (*config.MongoDBConfig, error) {
-	switch v := raw.(type) {
-	case *config.MongoDBConfig:
-		if v == nil {
-			return nil, fmt.Errorf("nil mongodb config")
+// EnumerateTables returns collection names and their document counts.
+// System collections (names starting with '.') are excluded.
+func (p *MongoDBProvider) EnumerateTables(ctx context.Context) (map[string]int64, error) {
+	p.mu.Lock()
+	db := p.database
+	p.mu.Unlock()
+
+	if db == nil {
+		return nil, fmt.Errorf("mongodb %s: not connected", p.role)
+	}
+
+	cursor, err := db.ListCollections(ctx, bson.M{})
+	if err != nil {
+		return nil, fmt.Errorf("list collections: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+
+	result := make(map[string]int64)
+	for cursor.Next(ctx) {
+		var collInfo bson.M
+		if err := cursor.Decode(&collInfo); err != nil {
+			continue
 		}
-		return v, nil
 
-	case config.MongoDBConfig:
-		return &v, nil
+		name, ok := collInfo["name"].(string)
+		if !ok || len(name) == 0 || name[0] == '.' {
+			continue
+		}
 
-	case map[string]string:
-		return mongoDBConfigFromMap(v)
+		count, err := db.Collection(name).CountDocuments(ctx, bson.M{})
+		if err != nil {
+			continue
+		}
+		result[name] = count
+	}
 
+	return result, nil
+}
+
+// ReadRecords reads specific documents by their keys.
+// Keys are in the format "collection:documentID".
+func (p *MongoDBProvider) ReadRecords(ctx context.Context, keys []string) (map[string]map[string]any, error) {
+	p.mu.Lock()
+	db := p.database
+	p.mu.Unlock()
+
+	if db == nil {
+		return nil, fmt.Errorf("mongodb %s: not connected", p.role)
+	}
+
+	result := make(map[string]map[string]any, len(keys))
+	for _, key := range keys {
+		parts := strings.SplitN(key, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		collection, idStr := parts[0], parts[1]
+
+		// Resolve the document ID (try ObjectID for 24-char hex strings)
+		var docID any = idStr
+		if len(idStr) == 24 {
+			if objID, err := bson.ObjectIDFromHex(idStr); err == nil {
+				docID = objID
+			}
+		}
+
+		var doc bson.M
+		if err := db.Collection(collection).FindOne(ctx, bson.M{"_id": docID}).Decode(&doc); err != nil {
+			continue
+		}
+
+		// Convert bson.M to map[string]any
+		record := make(map[string]any, len(doc))
+		for k, v := range doc {
+			record[k] = v
+		}
+		result[key] = record
+	}
+
+	return result, nil
+}
+
+// ComputeChecksums computes MD5 checksums for each requested document.
+// It serializes the document to canonical JSON with sorted keys, then hashes
+// the result.
+func (p *MongoDBProvider) ComputeChecksums(ctx context.Context, keys []string) (map[string]string, error) {
+	p.mu.Lock()
+	db := p.database
+	p.mu.Unlock()
+
+	if db == nil {
+		return nil, fmt.Errorf("mongodb %s: not connected", p.role)
+	}
+
+	result := make(map[string]string, len(keys))
+	for _, key := range keys {
+		// Read the record
+		record, err := p.ReadRecords(ctx, []string{key})
+		if err != nil || len(record) == 0 {
+			continue
+		}
+
+		data, ok := record[key]
+		if !ok {
+			continue
+		}
+
+		// Serialize to deterministic JSON
+		jsonBytes, err := sonic.Marshal(canonicalizeMongoValue(data))
+		if err != nil {
+			continue
+		}
+
+		// Compute MD5 hash
+		hash := sha256.Sum256(jsonBytes)
+		result[key] = hex.EncodeToString(hash[:])
+	}
+
+	return result, nil
+}
+
+type canonicalKV struct {
+	Key   string `json:"key"`
+	Value any    `json:"value"`
+}
+
+func canonicalizeMongoValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		out := make([]canonicalKV, 0, len(keys))
+		for _, k := range keys {
+			out = append(out, canonicalKV{Key: k, Value: canonicalizeMongoValue(x[k])})
+		}
+		return out
+	case bson.M:
+		m := make(map[string]any, len(x))
+		for k, v := range x {
+			m[k] = v
+		}
+		return canonicalizeMongoValue(m)
+	case []any:
+		out := make([]any, len(x))
+		for i := range x {
+			out[i] = canonicalizeMongoValue(x[i])
+		}
+		return out
+	case bson.A:
+		out := make([]any, len(x))
+		for i := range x {
+			out[i] = canonicalizeMongoValue(x[i])
+		}
+		return out
+	case bson.ObjectID:
+		return x.Hex()
 	default:
-		return nil, fmt.Errorf("unsupported mongodb config type: %T", raw)
+		return v
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Config resolution
+// ---------------------------------------------------------------------------
 
 // mongoDBConfigFromMap builds a MongoDBConfig from a tunnel-resolved address map.
 func mongoDBConfigFromMap(m map[string]string) (*config.MongoDBConfig, error) {
@@ -202,14 +362,12 @@ func mongoDBConfigFromMap(m map[string]string) (*config.MongoDBConfig, error) {
 }
 
 // buildMongoDBURI constructs a MongoDB connection URI from config.
+// Uses url.UserPassword for proper URL-encoding of credentials.
 func buildMongoDBURI(cfg *config.MongoDBConfig) string {
 	uri := "mongodb://"
 
 	if cfg.Username != "" {
-		uri += cfg.Username
-		if cfg.Password != "" {
-			uri += ":" + cfg.Password
-		}
+		uri += url.UserPassword(cfg.Username, cfg.Password).String()
 		uri += "@"
 	}
 
@@ -221,6 +379,14 @@ func buildMongoDBURI(cfg *config.MongoDBConfig) string {
 
 	if cfg.AuthSource != "" && cfg.AuthSource != "admin" {
 		uri += "?authSource=" + cfg.AuthSource
+	}
+
+	if cfg.TLS {
+		if strings.Contains(uri, "?") {
+			uri += "&tls=true"
+		} else {
+			uri += "?tls=true"
+		}
 	}
 
 	return uri

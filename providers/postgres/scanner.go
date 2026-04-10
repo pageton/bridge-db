@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"github.com/bytedance/sonic"
 	"io"
 	"strings"
 
@@ -51,11 +50,14 @@ func newPostgresScanner(pool *pgxpool.Pool, opts provider.ScanOptions) *postgres
 		log:  logger.L().With("component", "postgres-scanner"),
 	}
 
-	// Parse resume token to skip already-scanned tables and rows.
+	// Parse resume token to restore stats for logging and diagnostics.
+	// Table skipping is handled by TablesCompleted filtering below; we do
+	// NOT use TablesDone for index-based skipping because it conflicts
+	// with name-based filtering and causes wrong positions after completed
+	// tables are removed from the list.
 	if len(opts.ResumeToken) > 0 {
-		if stats, err := unmarshalScanToken(opts.ResumeToken); err == nil {
+		if stats, err := provider.UnmarshalScanToken(opts.ResumeToken); err == nil {
 			s.stats = stats
-			s.currentTable = stats.TablesDone
 			s.log.Info("resuming from checkpoint",
 				"tables_done", stats.TablesDone,
 				"tables_total", stats.TablesTotal,
@@ -371,10 +373,10 @@ func (s *postgresScanner) readRow(ctx context.Context) (*provider.MigrationUnit,
 		Table:    table.Name,
 		DataType: provider.DataTypeRow,
 		Data:     rowData,
-		Metadata: map[string]any{
-			"schema":      table.Schema,
-			"table":       table.Name,
-			"primary_key": pk,
+		Meta: provider.UnitMeta{
+			Schema:      table.Schema,
+			PrimaryKey:  pk,
+			ColumnTypes: columnTypes,
 		},
 		Size: size,
 	}, nil
@@ -383,21 +385,4 @@ func (s *postgresScanner) readRow(ctx context.Context) (*provider.MigrationUnit,
 // quoteIdentifier quotes a PostgreSQL identifier.
 func quoteIdentifier(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
-
-// unmarshalScanToken deserializes a resume token.
-func unmarshalScanToken(token []byte) (provider.ScanStats, error) {
-	if len(token) == 0 {
-		return provider.ScanStats{}, nil
-	}
-	var m map[string]int64
-	if err := sonic.Unmarshal(token, &m); err != nil {
-		return provider.ScanStats{}, err
-	}
-	return provider.ScanStats{
-		TotalScanned: m["total_scanned"],
-		TotalBytes:   m["total_bytes"],
-		TablesDone:   int(m["tables_done"]),
-		TablesTotal:  int(m["tables_total"]),
-	}, nil
 }

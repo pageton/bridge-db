@@ -2,6 +2,7 @@ package mariadb
 
 import (
 	"fmt"
+
 	"github.com/bytedance/sonic"
 )
 

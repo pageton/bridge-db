@@ -4,6 +4,7 @@ package sqlite
 
 import (
 	"fmt"
+
 	"github.com/bytedance/sonic"
 )
 

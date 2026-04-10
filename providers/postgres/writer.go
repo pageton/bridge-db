@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -105,6 +107,11 @@ func (w *postgresWriter) writeTable(ctx context.Context, tableKey string, rows [
 	for col := range firstRow.Data {
 		columns = append(columns, col)
 	}
+	sort.Strings(columns)
+
+	if err := w.ensureTableExists(ctx, schema, table, firstRow, columns); err != nil {
+		return fmt.Errorf("ensure table exists: %w", err)
+	}
 
 	// Check conflict strategy
 	if w.opts.OnConflict == provider.ConflictSkip {
@@ -113,6 +120,49 @@ func (w *postgresWriter) writeTable(ctx context.Context, tableKey string, rows [
 
 	// Default: overwrite (upsert)
 	return w.writeWithUpsert(ctx, schema, table, columns, rows, failedKeys, errors)
+}
+
+func (w *postgresWriter) ensureTableExists(ctx context.Context, schema, table string, row postgresRow, columns []string) error {
+	stmts := buildCreateTableStatements(schema, table, row, columns)
+	for _, stmt := range stmts {
+		if _, err := w.pool.Exec(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func buildCreateTableStatements(schema, table string, row postgresRow, columns []string) []string {
+	stmts := []string{
+		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quoteIdentifier(schema)),
+	}
+
+	defs := make([]string, 0, len(columns)+1)
+	for _, col := range columns {
+		colType := "TEXT"
+		if mapped, ok := row.ColumnTypes[col]; ok && mapped != "" {
+			colType = mapped
+		}
+		defs = append(defs, fmt.Sprintf("%s %s", quoteIdentifier(col), colType))
+	}
+
+	if len(row.PrimaryKey) > 0 {
+		pkCols := make([]string, 0, len(row.PrimaryKey))
+		for col := range row.PrimaryKey {
+			pkCols = append(pkCols, quoteIdentifier(col))
+		}
+		sort.Strings(pkCols)
+		defs = append(defs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(pkCols, ", ")))
+	}
+
+	stmts = append(stmts, fmt.Sprintf(
+		"CREATE TABLE IF NOT EXISTS %s.%s (\n  %s\n)",
+		quoteIdentifier(schema),
+		quoteIdentifier(table),
+		strings.Join(defs, ",\n  "),
+	))
+
+	return stmts
 }
 
 // writeWithUpsert uses COPY for bulk insert. Falls back to batch INSERT ON CONFLICT
@@ -187,7 +237,7 @@ func (w *postgresWriter) writeWithBatchUpsert(ctx context.Context, schema, table
 	for _, row := range rows {
 		values := make([]any, len(columns))
 		for i, col := range columns {
-			values[i] = row.Data[col]
+			values[i] = coercePostgresValue(row.Data[col], row.ColumnTypes[col])
 		}
 		batch.Queue(query, values...)
 	}
@@ -241,7 +291,7 @@ func (w *postgresWriter) writeWithSkip(ctx context.Context, schema, table string
 	for _, row := range rows {
 		values := make([]any, len(columns))
 		for i, col := range columns {
-			values[i] = row.Data[col]
+			values[i] = coercePostgresValue(row.Data[col], row.ColumnTypes[col])
 		}
 		batch.Queue(query, values...)
 	}
@@ -297,24 +347,7 @@ func (s *postgresRowSource) Values() ([]any, error) {
 	row := s.rows[s.idx-1]
 	values := make([]any, len(s.columns))
 	for i, col := range s.columns {
-		v := row.Data[col]
-		if s, ok := v.(string); ok {
-			ct := strings.ToUpper(row.ColumnTypes[col])
-			if strings.HasPrefix(ct, "TIMESTAMP") || strings.HasPrefix(ct, "TIMESTAMPTZ") {
-				for _, layout := range []string{
-					time.RFC3339Nano,
-					time.RFC3339,
-					"2006-01-02 15:04:05.999999",
-					"2006-01-02 15:04:05",
-				} {
-					if t, err := time.Parse(layout, s); err == nil {
-						v = t
-						break
-					}
-				}
-			}
-		}
-		values[i] = v
+		values[i] = coercePostgresValue(row.Data[col], row.ColumnTypes[col])
 	}
 	return values, nil
 }
@@ -354,4 +387,48 @@ func buildPKWhere(pk map[string]any, startIdx int) (string, []any) {
 	}
 
 	return strings.Join(clauses, " AND "), args
+}
+
+func coercePostgresValue(v any, columnType string) any {
+	ct := strings.ToUpper(columnType)
+	if s, ok := v.(string); ok {
+		if strings.HasPrefix(ct, "TIMESTAMP") || strings.HasPrefix(ct, "TIMESTAMPTZ") {
+			for _, layout := range []string{
+				time.RFC3339Nano,
+				time.RFC3339,
+				"2006-01-02 15:04:05.999999",
+				"2006-01-02 15:04:05",
+			} {
+				if t, err := time.Parse(layout, s); err == nil {
+					return t
+				}
+			}
+		}
+		return s
+	}
+
+	if ct == "TEXT" || ct == "VARCHAR" || strings.HasPrefix(ct, "VARCHAR(") {
+		switch x := v.(type) {
+		case nil:
+			return nil
+		case fmt.Stringer:
+			return x.String()
+		case float64:
+			return strconv.FormatFloat(x, 'f', -1, 64)
+		case float32:
+			return strconv.FormatFloat(float64(x), 'f', -1, 32)
+		case int:
+			return strconv.Itoa(x)
+		case int8, int16, int32, int64:
+			return fmt.Sprintf("%d", x)
+		case uint, uint8, uint16, uint32, uint64:
+			return fmt.Sprintf("%d", x)
+		case bool:
+			return strconv.FormatBool(x)
+		default:
+			return fmt.Sprintf("%v", x)
+		}
+	}
+
+	return v
 }
