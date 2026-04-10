@@ -575,7 +575,7 @@ func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migr
 	go func() {
 		defer scanWg.Done()
 		defer close(scanCh)
-		defer scanner.Close()
+		defer func() { _ = scanner.Close() }()
 
 		for {
 			if err := ctx.Err(); err != nil {

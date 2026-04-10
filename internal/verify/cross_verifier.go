@@ -379,7 +379,7 @@ func (cv *CrossVerifier) sampleKeys(ctx context.Context, table string, n int, al
 		BatchSize:       n,
 		TablesCompleted: skip,
 	})
-	defer scanner.Close()
+	defer func() { _ = scanner.Close() }()
 
 	var keys []string
 	for len(keys) < n {
