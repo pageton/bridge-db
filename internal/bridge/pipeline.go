@@ -2,12 +2,16 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"github.com/bytedance/sonic"
 	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/pageton/bridge-db/internal/config"
 	"github.com/pageton/bridge-db/internal/logger"
@@ -15,6 +19,7 @@ import (
 	"github.com/pageton/bridge-db/internal/retry"
 	"github.com/pageton/bridge-db/internal/transform"
 	"github.com/pageton/bridge-db/internal/tunnel"
+	"github.com/pageton/bridge-db/internal/verify"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
@@ -23,6 +28,14 @@ type scanResult struct {
 	batchID int
 	units   []provider.MigrationUnit
 	err     error
+}
+
+// migrationState carries per-run state that accumulates across pipeline steps.
+type migrationState struct {
+	summary      *provider.MigrationSummary
+	checkpoint   *Checkpoint
+	startBatchID int
+	allErrors    []error
 }
 
 // Pipeline orchestrates a full migration from source to destination.
@@ -39,17 +52,33 @@ type Pipeline struct {
 	src         provider.Provider
 	dst         provider.Provider
 	transformer transform.Transformer
-	writtenKeys []string
+	srcCaps     provider.Capabilities
+	dstCaps     provider.Capabilities
 
-	pauseCh  chan struct{}
-	resumeCh chan struct{}
-	paused   atomic.Bool
-	cancelFn context.CancelFunc
+	keyRing       []string
+	keyRingHead   int
+	keyRingLen    int
+	writtenKeySet map[string]bool
+	totalWritten  int64
+	startTime     time.Time
+	scannedTables []string
+	tableSet      map[string]bool
+	keysEvicted   bool // true when key dedup set exceeded MaxWrittenKeys
+
+	// keyMu protects keyRing and writtenKeySet for concurrent access.
+	keyMu sync.Mutex
+	// cpMu serialises checkpoint writes across concurrent workers.
+	cpMu           sync.Mutex
+	batchesSinceCP int
+
+	pauseCond *sync.Cond
+	paused    atomic.Bool
+	cancelFn  context.CancelFunc
 }
 
 // NewPipeline creates a new pipeline from the given configuration.
 // The caller must invoke Run() to start the migration.
-func NewPipeline(cfg *config.MigrationConfig, opts PipelineOptions, reporter provider.ProgressReporter, cpStore CheckpointStore) *Pipeline {
+func NewPipeline(cfg *config.MigrationConfig, opts PipelineOptions, reporter provider.ProgressReporter, cpStore CheckpointStore) (*Pipeline, error) {
 	if reporter == nil {
 		reporter = progress.NopReporter{}
 	}
@@ -57,50 +86,127 @@ func NewPipeline(cfg *config.MigrationConfig, opts PipelineOptions, reporter pro
 		var err error
 		cpStore, err = NewFileCheckpointStore(cfg.Checkpoint.Path)
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("create checkpoint store: %w", err)
 		}
 	}
-	return &Pipeline{
-		config:     cfg,
-		opts:       opts,
-		reporter:   reporter,
-		metrics:    progress.NewMetricsCollector(),
-		checkpoint: cpStore,
-		tunnels:    tunnel.NewPool(),
-		pauseCh:    make(chan struct{}),
-		resumeCh:   make(chan struct{}),
+	p := &Pipeline{
+		config:        cfg,
+		opts:          opts,
+		reporter:      reporter,
+		metrics:       progress.NewMetricsCollector(),
+		checkpoint:    cpStore,
+		tunnels:       tunnel.NewPool(),
+		keyRing:       make([]string, 1024),
+		writtenKeySet: make(map[string]bool, 1024),
+		tableSet:      make(map[string]bool),
 	}
+	p.pauseCond = sync.NewCond(&sync.Mutex{})
+	return p, nil
 }
 
-// Run executes the full migration pipeline and returns a summary.
-// It respects context cancellation for graceful shutdown.
+// stepLog returns a logger pre-loaded with step and phase context for structured
+// logging. Every pipeline step should use this instead of creating ad-hoc loggers.
+func (p *Pipeline) stepLog(step int, phase string) *slog.Logger {
+	return logger.L().With("component", "pipeline", "step", step, "phase", phase)
+}
+
+// Run executes the full migration pipeline following a 10-step sequence:
+//
+//  1. Load config        — validate pipeline options
+//  2. Validate           — establish SSH tunnels
+//  3. Initialize         — connect to source and destination
+//  4. Inspect            — load checkpoint, inspect and migrate schema
+//  5. Plan               — handle resume, prepare scan/write options
+//  6. Extract            — read batches from source (scanner goroutine)
+//  7. Transform          — apply data transformation (inline in scanner)
+//  8. Write              — persist batches to destination (writer goroutines)
+//  9. Verify             — compare source and destination data
+//
+// 10. Finalize           — build summary, clear checkpoint, report completion
+//
+// Steps 6–8 run concurrently via a producer-consumer pipeline.
 func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	p.cancelFn = cancel
 	defer cancel()
 
-	log := logger.L().With("component", "pipeline")
 	result := &RunResult{
 		Config:      p.config,
 		SrcProvider: p.config.Source.Provider,
 		DstProvider: p.config.Destination.Provider,
+		Failures:    NewFailureSummary(),
 	}
 
-	summary := &provider.MigrationSummary{
-		StartTime: time.Now(),
+	ms := &migrationState{
+		summary: &provider.MigrationSummary{
+			StartTime: time.Now(),
+		},
+	}
+	p.startTime = ms.summary.StartTime
+
+	// Step 1: Load config — validate pipeline options.
+	if err := p.stepLoadConfig(result); err != nil {
+		return nil, err
 	}
 
-	// ---------------------------------------------------------------
-	// Phase: INIT
-	// ---------------------------------------------------------------
+	logger.L().Info("step completed", "step", 1, "phase", "init", "duration", result.Phases[len(result.Phases)-1].Duration)
+
+	// Step 2: Validate source and destination — establish SSH tunnels.
+	if err := p.stepValidate(ctx, result); err != nil {
+		return nil, err
+	}
+	logger.L().Info("step completed", "step", 2, "phase", "tunnel", "duration", result.Phases[len(result.Phases)-1].Duration)
+	defer func() { _ = p.tunnels.CloseAll() }()
+
+	// Step 3: Initialize providers — connect to source and destination.
+	if err := p.stepInitProviders(ctx, result); err != nil {
+		return nil, err
+	}
+	logger.L().Info("step completed", "step", 3, "phase", "connect", "duration", result.Phases[len(result.Phases)-1].Duration)
+
+	defer func() { _ = p.src.Close() }()
+	defer func() { _ = p.dst.Close() }()
+
+	// Step 4: Inspect schema/metadata — load checkpoint, inspect and migrate schema.
+	if err := p.stepInspect(ctx, result, ms); err != nil {
+		return nil, err
+	}
+
+	// Step 5: Plan migration — handle resume, prepare scan/write options.
+	if err := p.stepPlan(ctx, result, ms); err != nil {
+		return nil, err
+	}
+
+	// Steps 6–8: Extract, transform, write — concurrent data transfer pipeline.
+	if err := p.stepTransfer(ctx, result, ms); err != nil {
+		return nil, err
+	}
+
+	logger.L().Info("step completed", "step", 8, "phase", "transfer", "duration", result.Phases[len(result.Phases)-1].Duration)
+
+	// Step 9: Verify results — compare source and destination data.
+	p.stepVerify(ctx, result, ms)
+
+	// Step 10: Finalize — build summary, clear checkpoint, report completion.
+	p.stepFinalize(ctx, result, ms)
+
+	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline step methods
+// ---------------------------------------------------------------------------
+
+// Step 1: Load config — validates pipeline options and logs migration parameters.
+func (p *Pipeline) stepLoadConfig(result *RunResult) error {
 	phaseStart := time.Now()
 	p.reporter.OnPhaseChange(provider.PhaseInit)
 
 	if err := p.opts.Validate(); err != nil {
-		return nil, fmt.Errorf("pipeline options: %w", err)
+		return NewConfigError(1, "pipeline options", err)
 	}
 
-	log.Info("migration starting",
+	logger.L().With("component", "pipeline").Info("migration starting",
 		"source", p.config.Source.Provider,
 		"destination", p.config.Destination.Provider,
 		"cross_db", p.config.IsCrossDB(),
@@ -111,74 +217,107 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 		Phase:    provider.PhaseInit,
 		Duration: time.Since(phaseStart),
 	})
+	return nil
+}
 
-	// ---------------------------------------------------------------
-	// Phase: TUNNEL
-	// ---------------------------------------------------------------
-	phaseStart = time.Now()
+// Step 2: Validate source and destination — establishes SSH tunnels.
+func (p *Pipeline) stepValidate(ctx context.Context, result *RunResult) error {
+	phaseStart := time.Now()
 	p.reporter.OnPhaseChange(provider.PhaseTunnel)
 
 	tunnelConfigs := p.buildTunnelConfigs()
-	if err := p.tunnels.OpenAll(ctx, tunnelConfigs); err != nil {
-		return nil, p.abort(result, fmt.Errorf("tunnel: %w", err))
+
+	// Retry tunnel open to tolerate transient network issues.
+	tunnelRetry := retry.ConnectionRetryConfig()
+	if err := retry.Do(ctx, tunnelRetry, func() error {
+		return p.tunnels.OpenAll(ctx, tunnelConfigs)
+	}); err != nil {
+		return p.abort(NewConnectionError("tunnel", "Failed to establish SSH tunnel to source or destination database", err).WithStep(2))
 	}
-	defer func() { _ = p.tunnels.CloseAll() }()
 
 	result.Phases = append(result.Phases, PhaseResult{
 		Phase:    provider.PhaseTunnel,
 		Duration: time.Since(phaseStart),
 	})
+	return nil
+}
 
-	// ---------------------------------------------------------------
-	// Phase: CONNECT
-	// ---------------------------------------------------------------
-	phaseStart = time.Now()
+// Step 3: Initialize providers — creates, connects, and pings source and
+// destination. Resolves capabilities and sets up the transformer.
+func (p *Pipeline) stepInitProviders(ctx context.Context, result *RunResult) error {
+	phaseStart := time.Now()
 	p.reporter.OnPhaseChange(provider.PhaseConnect)
+	log := p.stepLog(3, "connect")
 
+	// Create provider instances.
 	srcProvider, err := provider.New(p.config.Source.Provider)
 	if err != nil {
-		return nil, p.abort(result, fmt.Errorf("source provider: %w", err))
+		return p.abort(NewConnectionError("connect", fmt.Sprintf("Failed to create source provider %q — check that the provider name is correct", p.config.Source.Provider), err).WithStep(3))
 	}
 	p.src = srcProvider
 
 	dstProvider, err := provider.New(p.config.Destination.Provider)
 	if err != nil {
-		return nil, p.abort(result, fmt.Errorf("dest provider: %w", err))
+		return p.abort(NewConnectionError("connect", fmt.Sprintf("Failed to create destination provider %q — check that the provider name is correct", p.config.Destination.Provider), err).WithStep(3))
 	}
 	p.dst = dstProvider
 
-	// Resolve tunnel addresses for connections
-	srcConfig := p.resolveProviderConfig("source", &p.config.Source)
-	dstConfig := p.resolveProviderConfig("destination", &p.config.Destination)
-
-	if err := p.src.Connect(ctx, srcConfig, nil); err != nil {
-		return nil, p.abort(result, fmt.Errorf("source connect: %w", err))
+	// Resolve tunnel addresses.
+	srcConfig, err := p.resolveProviderConfig("source", &p.config.Source)
+	if err != nil {
+		return p.abort(NewConnectionError("connect", "Failed to resolve source provider configuration", err).WithStep(3))
 	}
-	defer func() { _ = p.src.Close() }()
-
-	if err := p.dst.Connect(ctx, nil, dstConfig); err != nil {
-		return nil, p.abort(result, fmt.Errorf("dest connect: %w", err))
+	dstConfig, err := p.resolveProviderConfig("destination", &p.config.Destination)
+	if err != nil {
+		return p.abort(NewConnectionError("connect", "Failed to resolve destination provider configuration", err).WithStep(3))
 	}
-	defer func() { _ = p.dst.Close() }()
 
-	if err := p.src.Ping(ctx); err != nil {
-		return nil, p.abort(result, fmt.Errorf("source ping: %w", err))
+	connectRetry := retry.ConnectionRetryConfig()
+
+	// Connect to source.
+	if err := retry.Do(ctx, connectRetry, func() error {
+		return p.src.Connect(ctx, srcConfig, nil)
+	}); err != nil {
+		return p.abort(NewConnectionError("connect", fmt.Sprintf("Could not connect to source %q — check host, port, credentials, and network", p.config.Source.Provider), err).WithStep(3))
 	}
-	if err := p.dst.Ping(ctx); err != nil {
-		return nil, p.abort(result, fmt.Errorf("dest ping: %w", err))
+
+	// Connect to destination.
+	if err := retry.Do(ctx, connectRetry, func() error {
+		return p.dst.Connect(ctx, nil, dstConfig)
+	}); err != nil {
+		return p.abort(NewConnectionError("connect", fmt.Sprintf("Could not connect to destination %q — check host, port, credentials, and network", p.config.Destination.Provider), err).WithStep(3))
+	}
+
+	// Ping both databases.
+	if err := retry.Do(ctx, connectRetry, func() error {
+		return p.src.Ping(ctx)
+	}); err != nil {
+		return p.abort(NewConnectionError("connect", fmt.Sprintf("Source %q is unreachable after connecting — it may have gone down", p.config.Source.Provider), err).WithStep(3))
+	}
+	if err := retry.Do(ctx, connectRetry, func() error {
+		return p.dst.Ping(ctx)
+	}); err != nil {
+		return p.abort(NewConnectionError("connect", fmt.Sprintf("Destination %q is unreachable after connecting — it may have gone down", p.config.Destination.Provider), err).WithStep(3))
 	}
 
 	log.Info("connected to both databases")
 
-	// Wrap providers for dry-run mode
+	// Resolve capabilities.
+	p.srcCaps = provider.ProviderCapabilities(p.src)
+	p.dstCaps = provider.ProviderCapabilities(p.dst)
+	log.Info("capabilities resolved",
+		"source", p.srcCaps,
+		"destination", p.dstCaps,
+	)
+
+	// Wrap destination for dry-run mode.
 	if p.opts.DryRun {
 		p.dst = p.dst.DryRun()
 		log.Info("dry-run mode enabled")
 	}
 
-	// ---------------------------------------------------------------
-	// RESOLVE TRANSFORMER (before schema migration needs the type mapper)
-	// ---------------------------------------------------------------
+	// Resolve transformer.
+	transform.SetGlobalConfig(p.buildTransformerConfig())
 	p.transformer = transform.GetTransformer(
 		p.config.Source.Provider,
 		p.config.Destination.Provider,
@@ -187,45 +326,42 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 		log.Info("transformer requires schema information")
 	}
 
+	// Run pre-migration validation before any data movement.
+	if err := p.runPreflight(ctx); err != nil {
+		return p.abort(err)
+	}
+
 	result.Phases = append(result.Phases, PhaseResult{
 		Phase:    provider.PhaseConnect,
 		Duration: time.Since(phaseStart),
 	})
+	return nil
+}
 
-	// ---------------------------------------------------------------
-	// RESUME CHECK
-	// ---------------------------------------------------------------
-	var checkpoint *Checkpoint
+// Step 4: Inspect schema/metadata — loads checkpoint, inspects source schema,
+// and migrates it to the destination if supported.
+func (p *Pipeline) stepInspect(ctx context.Context, result *RunResult, ms *migrationState) error {
+	log := p.stepLog(4, "inspect")
+
+	// Load checkpoint.
 	if !p.opts.CheckpointEnabled {
 		log.Info("checkpointing disabled")
 	} else {
-		checkpoint, err = p.checkpoint.Load(ctx)
+		checkpoint, err := p.checkpoint.Load(ctx)
 		if err != nil {
 			log.Warn("failed to load checkpoint, starting fresh", "error", err)
 			checkpoint = nil
 		}
-		if checkpoint != nil && p.opts.Resume {
-			result.Resumed = true
-			log.Info("resuming from checkpoint",
-				"last_batch", checkpoint.LastBatchID,
-				"timestamp", checkpoint.Timestamp,
-			)
-		} else if checkpoint != nil {
-			log.Info("checkpoint found but --resume not set, starting fresh")
-			_ = p.checkpoint.Clear(ctx)
-			checkpoint = nil
-		}
+		ms.checkpoint = checkpoint
 	}
 
-	// ---------------------------------------------------------------
-	// Phase: SCHEMA MIGRATION
-	// ---------------------------------------------------------------
+	// Schema migration.
 	if p.shouldMigrateSchema() {
-		phaseStart = time.Now()
+		phaseStart := time.Now()
 		p.reporter.OnPhaseChange(provider.PhaseSchemaMigration)
 
 		if err := p.migrateSchema(ctx); err != nil {
-			return nil, p.abort(result, fmt.Errorf("schema migration: %w", err))
+			return p.abort(NewSchemaError(fmt.Sprintf("Schema migration from %s to %s failed — destination may have incompatible types or constraints", p.config.Source.Provider, p.config.Destination.Provider), err).WithStep(4))
 		}
 
 		result.Phases = append(result.Phases, PhaseResult{
@@ -234,16 +370,111 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 		})
 	}
 
-	// ---------------------------------------------------------------
-	// Phase: SCAN + TRANSFORM + WRITE
-	// ---------------------------------------------------------------
-	phaseStart = time.Now()
+	return nil
+}
+
+// Step 5: Plan migration — handles resume logic, builds a structured migration
+// plan, restores dedup state, and prepares the batch start ID.
+func (p *Pipeline) stepPlan(ctx context.Context, result *RunResult, ms *migrationState) error {
+	log := p.stepLog(5, "plan")
+
+	if ms.checkpoint != nil && p.opts.Resume {
+		// Validate config hasn't changed between runs.
+		currentHash := computeConfigHash(p.config)
+		if ms.checkpoint.ConfigHash != "" && ms.checkpoint.ConfigHash != currentHash {
+			return NewConfigError(5, fmt.Sprintf("config has changed since the checkpoint was created. "+
+				"Remove the checkpoint file or use the same configuration to resume. "+
+				"Checkpoint hash: %s, current hash: %s", ms.checkpoint.ConfigHash[:8], currentHash[:8]), nil)
+		}
+		// Validate providers match.
+		if ms.checkpoint.SourceProvider != p.config.Source.Provider {
+			return NewConfigError(5, fmt.Sprintf("checkpoint source provider %q does not match current %q",
+				ms.checkpoint.SourceProvider, p.config.Source.Provider), nil)
+		}
+		if ms.checkpoint.DestProvider != p.config.Destination.Provider {
+			return NewConfigError(5, fmt.Sprintf("checkpoint destination provider %q does not match current %q",
+				ms.checkpoint.DestProvider, p.config.Destination.Provider), nil)
+		}
+		// Restore written keys for dedup.  The ring buffer must be
+		// large enough to hold all restored keys to prevent immediate
+		// eviction by recordKeys.
+		if len(ms.checkpoint.WrittenKeys) > 0 {
+			for _, k := range ms.checkpoint.WrittenKeys {
+				p.writtenKeySet[k] = true
+			}
+			ringSize := len(ms.checkpoint.WrittenKeys)
+			if ringSize < p.opts.MaxWrittenKeys {
+				ringSize = p.opts.MaxWrittenKeys
+			}
+			ring := make([]string, ringSize)
+			copy(ring, ms.checkpoint.WrittenKeys)
+			p.keyRing = ring
+			p.keyRingLen = len(ms.checkpoint.WrittenKeys)
+			p.keyRingHead = len(ms.checkpoint.WrittenKeys) % ringSize
+			p.totalWritten = ms.checkpoint.TotalWritten
+		}
+		result.Resumed = true
+
+		// Warn if restored keys hit the cap - older keys were evicted,
+		// so resume dedup is incomplete. For non-overwrite strategies,
+		// this would cause duplicate-key errors on re-write.
+		if ms.checkpoint.TotalWritten > int64(p.opts.MaxWrittenKeys) {
+			if p.opts.ConflictStrategy != provider.ConflictOverwrite {
+				return NewConfigError(5, fmt.Sprintf("cannot resume: %d keys were written but only %d tracked for dedup "+
+					"with conflict strategy %q. Either increase --max-written-keys, switch to --on-conflict overwrite, "+
+					"or remove the checkpoint to start fresh",
+					ms.checkpoint.TotalWritten, p.opts.MaxWrittenKeys, p.opts.ConflictStrategy), nil)
+			}
+			log.Warn("resume dedup is incomplete: more keys were written than the tracking cap allows. "+
+				"Evicted keys will be re-written (harmless with overwrite strategy)",
+				"total_written", ms.checkpoint.TotalWritten,
+				"max_tracked_keys", p.opts.MaxWrittenKeys,
+			)
+		}
+
+		log.Info("resuming from checkpoint",
+			"last_batch", ms.checkpoint.LastBatchID,
+			"total_written", ms.checkpoint.TotalWritten,
+			"tables_completed", len(ms.checkpoint.TablesCompleted),
+			"last_table_scanning", ms.checkpoint.LastTableScanning,
+			"restored_keys", len(ms.checkpoint.WrittenKeys),
+			"timestamp", ms.checkpoint.Timestamp,
+		)
+	} else if ms.checkpoint != nil {
+		log.Info("checkpoint found but --resume not set, starting fresh")
+		_ = p.checkpoint.Clear(ctx)
+		ms.checkpoint = nil
+	}
+
+	ms.startBatchID = lastBatchID(ms.checkpoint)
+
+	// Build the structured migration plan.
+	plan := p.buildPlan(ctx)
+	result.Plan = plan
+	logPlan(plan)
+
+	return nil
+}
+
+// Step 6–8: Transfer data — runs the concurrent data transfer pipeline.
+//
+// The scanner goroutine reads from the source (step 6: extract), transforms
+// inline (step 7: transform), and produces into a buffered channel. N writer
+// goroutines consume batches and write to the destination (step 8: write).
+//
+// TODO: The single scanner goroutine is the throughput bottleneck when source
+// reads are slow relative to writes. Write workers spend time idle waiting for
+// the channel. A future improvement would support parallel scanners (one per
+// table or range-partitioned within a table).
+func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migrationState) error {
+	phaseStart := time.Now()
 	p.reporter.OnPhaseChange(provider.PhaseScanning)
+	log := p.stepLog(8, "transfer")
 
 	scanOpts := provider.ScanOptions{
 		BatchSize:       p.opts.BatchSize,
-		ResumeToken:     resumeToken(checkpoint),
-		TablesCompleted: tablesCompleted(checkpoint),
+		ResumeToken:     resumeToken(ms.checkpoint),
+		TablesCompleted: tablesCompleted(ms.checkpoint),
 	}
 	scanner := p.src.Scanner(ctx, scanOpts)
 
@@ -251,24 +482,18 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 		BatchSize:  p.opts.BatchSize,
 		OnConflict: p.opts.ConflictStrategy,
 	}
-	writer := p.dst.Writer(ctx, writeOpts)
 
-	batchID := lastBatchID(checkpoint)
+	batchID := ms.startBatchID
 	var allErrors []error
-
-	// maxErrorsToTrack caps the number of errors stored in memory.
-	// After this limit, errors are counted but not retained.
 	const maxErrorsToTrack = 1000
-
 	var errorsMu sync.Mutex
+	var lastWrittenBatchID atomic.Int64
 
-	// scanBuffer controls how many batches can be queued between scanner and writer.
-	// The value is taken from opts.Parallel.
 	scanBuffer := p.opts.Parallel
-
 	scanCh := make(chan scanResult, scanBuffer)
 
-	// Start scanner goroutine.
+	// Step 6–7: Scanner goroutine — extracts batches from source and
+	// transforms them inline before producing into the channel.
 	var scanWg sync.WaitGroup
 	scanWg.Add(1)
 	go func() {
@@ -281,6 +506,7 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 				return
 			}
 
+			// Step 6: Extract — read next batch from source.
 			var units []provider.MigrationUnit
 			units, err := scanner.Next(ctx)
 			if err == io.EOF {
@@ -300,7 +526,10 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 					return err
 				})
 				if scanRetryErr != nil {
-					scanCh <- scanResult{err: scanRetryErr}
+					select {
+					case scanCh <- scanResult{err: scanRetryErr}:
+					case <-ctx.Done():
+					}
 					continue
 				}
 				if err == io.EOF {
@@ -312,17 +541,15 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 				continue
 			}
 
-			batchID++
-			p.metrics.RecordScan(int64(len(units)), totalSize(units))
-			p.reporter.OnBatchStart(batchID, len(units))
-
-			if _, ok := p.transformer.(transform.NoopTransformer); !ok {
+			// Step 7: Transform — apply data transformation.
+			if !transform.IsNoopTransformer(p.transformer) {
 				p.reporter.OnPhaseChange(provider.PhaseTransforming)
 				transformErr := retry.Do(ctx, retry.Config{
 					MaxAttempts:     p.opts.MaxRetries + 1,
 					InitialInterval: p.opts.RetryBackoff,
 					MaxInterval:     10 * time.Second,
 					Multiplier:      2.0,
+					Operation:       "transform batch",
 				}, func() error {
 					var terr error
 					units, terr = p.transformer.Transform(ctx, units)
@@ -332,228 +559,481 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 					p.reporter.OnError(transformErr, nil)
 					p.metrics.RecordError()
 					errorsMu.Lock()
-					appendError(&allErrors, maxErrorsToTrack, transformErr)
+					appendError(&allErrors, maxErrorsToTrack, NewTransformError(batchID+1, transformErr))
 					errorsMu.Unlock()
-					log.Warn("transform error after retries, skipping batch", "batch", batchID, "error", transformErr)
+
+					if p.opts.FailFast {
+						log.Error("transform error after retries, aborting (fail-fast enabled)",
+							"error", transformErr,
+							"batch", batchID+1,
+						)
+						scanCh <- scanResult{err: transformErr}
+						return
+					}
+					log.Warn("transform error after retries, skipping batch",
+						"error", transformErr,
+						"batch", batchID+1,
+					)
 					continue
 				}
-				p.reporter.OnPhaseChange(provider.PhaseWriting)
 			}
 
-			scanCh <- scanResult{batchID: batchID, units: units}
+			// Split into sub-batches when MaxBatchBytes is set and exceeded.
+			for _, sub := range splitBatch(units, p.opts.MaxBatchBytes) {
+				batchID++
+				p.metrics.RecordScan(int64(len(sub)), totalSize(sub))
+				p.reporter.OnBatchStart(batchID, len(sub))
+				p.reporter.OnPhaseChange(provider.PhaseWriting)
+				select {
+				case scanCh <- scanResult{batchID: batchID, units: sub}:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
 	}()
 
-	// Consume scan results and write them.
-	for sr := range scanCh {
-		// Check for pause
-		p.waitForResume()
-
-		// Check tunnel health
-		if !p.tunnels.AllHealthy() {
-			// Drain remaining buffered batches before aborting
-			// so we can checkpoint everything that was already scanned.
-			p.drainAndCheckpoint(ctx, scanCh, writer, &allErrors, maxErrorsToTrack, &errorsMu, scanner, sr.batchID)
-			return nil, p.abort(result, fmt.Errorf("SSH tunnel disconnected"))
+	// Create one batchWriter per worker so that concurrent writes are safe.
+	numWorkers := p.opts.WriteWorkers
+	batchWriters := make([]*batchWriter, numWorkers)
+	for i := range batchWriters {
+		batchWriters[i] = &batchWriter{
+			w: p.dst.Writer(ctx, writeOpts),
+			cfg: writeConfig{
+				MaxRetries:       p.opts.MaxRetries,
+				RetryBackoff:     p.opts.RetryBackoff,
+				ConflictStrategy: p.opts.ConflictStrategy,
+				MaxPerUnitRetry:  min(p.opts.MaxRetries+1, 50),
+			},
 		}
-
-		// Check context cancellation
-		if err := ctx.Err(); err != nil {
-			p.saveCheckpoint(ctx, sr.batchID, scanner)
-			return nil, p.abort(result, fmt.Errorf("cancelled: %w", err))
-		}
-
-		// Handle scan errors from the producer.
-		if sr.err != nil {
-			p.reporter.OnError(sr.err, nil)
-			p.metrics.RecordError()
-			errorsMu.Lock()
-			appendError(&allErrors, maxErrorsToTrack, sr.err)
-			errorsMu.Unlock()
-			log.Warn("scan error, skipping batch", "error", sr.err)
-			continue
-		}
-
-		// Write with retry
-		var batchResult *provider.BatchResult
-		retryCfg := retry.Config{
-			MaxAttempts:     p.opts.MaxRetries + 1,
-			InitialInterval: p.opts.RetryBackoff,
-			MaxInterval:     30 * time.Second,
-			Multiplier:      2.0,
-		}
-		writeErr := retry.Do(ctx, retryCfg, func() error {
-			var werr error
-			batchResult, werr = writer.Write(ctx, sr.units)
-			return werr
-		})
-
-		if writeErr != nil {
-			p.reporter.OnError(writeErr, nil)
-			p.metrics.RecordError()
-			errorsMu.Lock()
-			appendError(&allErrors, maxErrorsToTrack, fmt.Errorf("batch %d: %w", sr.batchID, writeErr))
-			errorsMu.Unlock()
-			continue
-		}
-
-		p.metrics.RecordBatch(batchResult)
-		p.reporter.OnBatchComplete(sr.batchID, batchResult)
-
-		for _, u := range sr.units {
-			p.writtenKeys = append(p.writtenKeys, u.Key)
-		}
-
-		// Save checkpoint after each successful batch
-		p.saveCheckpoint(ctx, sr.batchID, scanner)
-
-		// Report progress
-		p.reporter.OnProgress(p.metrics.Snapshot(provider.PhaseWriting))
 	}
 
-	// Wait for scanner to finish.
+	// Step 8: Write — writer goroutines consume batches and persist to destination.
+	var writeWg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		writeWg.Add(1)
+		go func(bw *batchWriter) {
+			defer writeWg.Done()
+			for sr := range scanCh {
+				// Respect pause.
+				p.waitIfPaused()
+
+				if err := ctx.Err(); err != nil {
+					return
+				}
+
+				// Scan errors from the producer.
+				if sr.err != nil {
+					p.reporter.OnError(sr.err, nil)
+					p.metrics.RecordError()
+					errorsMu.Lock()
+					appendError(&allErrors, maxErrorsToTrack, NewScanError("scan failed", sr.err))
+					errorsMu.Unlock()
+					log.Warn("scan error, skipping batch",
+						"error", sr.err,
+						"batch", sr.batchID,
+					)
+					continue
+				}
+
+				bw.batchID = sr.batchID
+				out := bw.writeBatch(ctx, p, sr.units)
+				processWriteOutcome(out, sr.batchID, sr.units, p, p.reporter, p.metrics, &allErrors, &errorsMu, maxErrorsToTrack)
+
+				if out.writeErr == nil && out.result != nil {
+					lastWrittenBatchID.Store(int64(sr.batchID))
+
+					// Checkpoint (throttled by interval).
+					p.maybeCheckpoint(ctx, sr.batchID, scanner)
+				}
+
+				p.reporter.OnProgress(p.metrics.Snapshot(provider.PhaseWriting))
+			}
+		}(batchWriters[i])
+	}
+
+	// Wait for scanner to finish producing (scanner goroutine closes scanCh via defer).
 	scanWg.Wait()
 
-	// Flush remaining writes
-	if err := writer.Flush(ctx); err != nil {
-		p.saveCheckpoint(ctx, batchID, scanner)
-		return nil, p.abort(result, fmt.Errorf("flush: %w", err))
+	// Wait for all writer workers to drain.
+	writeWg.Wait()
+
+	// Flush all writer instances.
+	for _, bw := range batchWriters {
+		if err := bw.flush(ctx); err != nil {
+			p.saveCheckpoint(context.Background(), int(lastWrittenBatchID.Load()), scanner)
+			return p.abort(NewWriteErrorExhausted(0, err).WithStep(8))
+		}
 	}
 
-	scanWriteDuration := time.Since(phaseStart)
+	// Final checkpoint on cancellation for resumability.
+	if err := ctx.Err(); err != nil {
+		p.saveCheckpoint(context.Background(), int(lastWrittenBatchID.Load()), scanner)
+		return p.abort(NewCancelledError("Migration was cancelled", err).WithStep(8))
+	}
+
+	ms.allErrors = allErrors
+
 	result.Phases = append(result.Phases, PhaseResult{
 		Phase:    provider.PhaseWriting,
-		Duration: scanWriteDuration,
+		Duration: time.Since(phaseStart),
 	})
+	return nil
+}
 
-	// ---------------------------------------------------------------
-	// Phase: VERIFY
-	// ---------------------------------------------------------------
-	if p.opts.Verify {
-		phaseStart = time.Now()
-		p.reporter.OnPhaseChange(provider.PhaseVerifying)
+// Step 9: Verify results — compares source and destination data using
+// capability-aware verification.
+func (p *Pipeline) stepVerify(ctx context.Context, result *RunResult, ms *migrationState) {
+	if !p.opts.Verify {
+		return
+	}
 
-		verifier := p.dst.Verifier(ctx)
-		// Verify a sample of keys
-		stats := p.metrics.Snapshot(provider.PhaseVerifying)
-		sampleKeys := make([]string, 0, min(100, int(stats.TotalWritten)))
-		// In a real implementation, we'd collect sample keys during writing.
-		// For now, pass an empty slice — the verifier will do count-based checks.
-		verifierErrors, err := verifier.Verify(ctx, sampleKeys)
+	phaseStart := time.Now()
+	p.reporter.OnPhaseChange(provider.PhaseVerifying)
+	log := p.stepLog(9, "verify")
+
+	effectiveLevel := provider.EffectiveVerifyLevel(p.srcCaps, p.dstCaps)
+	log.Info("effective verification level", "level", effectiveLevel)
+
+	// Use user-provided verification options, falling back to defaults.
+	verifyOpts := p.opts.VerifyOptions
+	if verifyOpts.SampleMode == "" {
+		verifyOpts = verify.DefaultOptions()
+	}
+
+	switch effectiveLevel {
+	case provider.VerifyCross:
+		cv := verify.NewCrossVerifier(p.src, p.dst, verifyOpts)
+		report, err := cv.Verify(ctx)
 		if err != nil {
 			log.Warn("verification error", "error", err)
+		} else {
+			result.VerificationReport = report
+			ms.summary.VerificationOK = report.Passed()
+			ms.summary.VerificationErrs = verify.ToVerificationErrors(report)
+			log.Info("verification complete",
+				"status", report.Status,
+				"tables", report.TotalTables,
+				"passed", report.PassCount,
+				"failed", report.FailCount,
+				"warned", report.WarnCount,
+				"sampled", report.TotalSampled,
+				"duration", report.Duration,
+			)
+		}
+
+	case provider.VerifyBasic:
+		verifier := p.dst.Verifier(ctx)
+		verifierErrors, err := verifier.Verify(ctx, p.writtenKeysFlat())
+		if err != nil {
+			log.Warn("verification error", "error", err)
+			ms.summary.VerificationOK = false
+			ms.summary.VerificationErrs = []provider.VerificationError{{
+				Message: fmt.Sprintf("verification failed: %v", err),
+			}}
 		} else if len(verifierErrors) > 0 {
-			summary.VerificationOK = false
-			summary.VerificationErrs = verifierErrors
+			ms.summary.VerificationOK = false
+			ms.summary.VerificationErrs = verifierErrors
 			log.Warn("verification found mismatches", "count", len(verifierErrors))
 		} else {
-			summary.VerificationOK = true
+			ms.summary.VerificationOK = true
 			log.Info("verification passed")
 		}
 
-		result.Phases = append(result.Phases, PhaseResult{
-			Phase:    provider.PhaseVerifying,
-			Duration: time.Since(phaseStart),
-		})
+	default:
+		log.Warn("verification skipped — neither source nor destination supports verification",
+			"source_level", p.srcCaps.Verification,
+			"destination_level", p.dstCaps.Verification,
+		)
+		ms.summary.VerificationOK = false
+		ms.summary.VerificationErrs = []provider.VerificationError{{
+			Message: "verification not supported by source or destination provider",
+		}}
 	}
 
-	// ---------------------------------------------------------------
-	// Phase: COMPLETE
-	// ---------------------------------------------------------------
+	result.Phases = append(result.Phases, PhaseResult{
+		Phase:    provider.PhaseVerifying,
+		Duration: time.Since(phaseStart),
+	})
+}
+
+// Step 10: Finalize — builds the migration summary, records failures,
+// clears the checkpoint, and reports completion.
+func (p *Pipeline) stepFinalize(ctx context.Context, result *RunResult, ms *migrationState) {
 	p.reporter.OnPhaseChange(provider.PhaseComplete)
+	log := p.stepLog(10, "finalize")
 	_ = p.checkpoint.Clear(ctx)
 
-	summary.EndTime = time.Now()
-	summary.Duration = summary.EndTime.Sub(summary.StartTime)
-	p.metrics.ToSummary(summary)
-	summary.Errors = allErrors
+	ms.summary.EndTime = time.Now()
+	ms.summary.Duration = ms.summary.EndTime.Sub(ms.summary.StartTime)
+	p.metrics.ToSummary(ms.summary)
+	ms.summary.Errors = ms.allErrors
+	for _, e := range ms.allErrors {
+		result.Failures.Record(e)
+	}
 
-	result.Summary = summary
+	result.Summary = ms.summary
 	result.CheckpointPath = p.config.Checkpoint.Path
 
-	p.reporter.OnMigrationComplete(summary)
+	p.reporter.OnMigrationComplete(ms.summary)
 
 	log.Info("migration complete",
-		"duration", summary.Duration,
-		"written", summary.TotalWritten,
-		"failed", summary.TotalFailed,
+		"duration", ms.summary.Duration.Round(time.Millisecond),
+		"written", ms.summary.TotalWritten,
+		"failed", ms.summary.TotalFailed,
+		"scanned", ms.summary.TotalScanned,
+		"skipped", ms.summary.TotalSkipped,
+		"bytes", ms.summary.BytesTransferred,
+		"tables", len(ms.summary.TableMetrics),
+		"errors", len(ms.allErrors),
 	)
 
-	return result, nil
+	// Per-table summary at debug level for debugging.
+	if len(ms.summary.TableMetrics) > 0 {
+		for _, tm := range ms.summary.TableMetrics {
+			log.Debug("table result",
+				"table", tm.Table,
+				"scanned", tm.Scanned,
+				"written", tm.Written,
+				"failed", tm.Failed,
+				"bytes", tm.Bytes,
+				"duration", tm.Duration.Round(time.Millisecond),
+			)
+		}
+	}
+
+	// Error category summary when there are failures.
+	if result.Failures != nil && result.Failures.Total > 0 {
+		log.Warn("migration completed with errors",
+			"total_errors", result.Failures.Total,
+			"categories", result.Failures.Counts,
+		)
+	}
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle controls
+// ---------------------------------------------------------------------------
 
 // Pause suspends the pipeline at the next batch boundary.
 func (p *Pipeline) Pause() {
 	p.paused.Store(true)
-	p.pauseCh <- struct{}{}
 	p.reporter.OnPhaseChange(provider.PhasePaused)
 }
 
+// Resume resumes a paused pipeline.
 func (p *Pipeline) Resume() {
 	p.paused.Store(false)
-	p.resumeCh <- struct{}{}
+	p.pauseCond.Broadcast()
 }
 
+// Cancel cancels the pipeline context.
 func (p *Pipeline) Cancel() {
 	if p.cancelFn != nil {
 		p.cancelFn()
 	}
 }
 
-func (p *Pipeline) waitForResume() {
-	if p.paused.Load() {
-		<-p.resumeCh
+// waitIfPaused blocks until the pipeline is resumed. Safe for concurrent workers.
+func (p *Pipeline) waitIfPaused() {
+	if !p.paused.Load() {
+		return
 	}
+	p.pauseCond.L.Lock()
+	for p.paused.Load() {
+		p.pauseCond.Wait()
+	}
+	p.pauseCond.L.Unlock()
 }
 
-// drainAndCheckpoint writes remaining buffered batches from the scan channel
-// and checkpoints the last successful batch. Used before aborting on tunnel failure.
-func (p *Pipeline) drainAndCheckpoint(
-	ctx context.Context,
-	scanCh <-chan scanResult,
-	writer provider.Writer,
-	allErrors *[]error,
-	maxErrors int,
-	errorsMu *sync.Mutex,
-	scanner provider.Scanner,
-	currentBatchID int,
-) {
-	lastWrittenBatch := currentBatchID
+// ---------------------------------------------------------------------------
+// Key tracking
+// ---------------------------------------------------------------------------
 
-drainLoop:
-	for {
-		select {
-		case sr, ok := <-scanCh:
-			if !ok {
-				break drainLoop
-			}
-			if sr.err != nil {
-				continue
-			}
-			if len(sr.units) == 0 {
-				continue
-			}
-			if _, err := writer.Write(ctx, sr.units); err != nil {
-				errorsMu.Lock()
-				appendError(allErrors, maxErrors, fmt.Errorf("batch %d (drain): %w", sr.batchID, err))
-				errorsMu.Unlock()
-				continue
-			}
-			lastWrittenBatch = sr.batchID
-		default:
-			break drainLoop
+// recordKeys adds unit keys to the tracking set, evicting the oldest entries
+// when the capacity (opts.MaxWrittenKeys) is exceeded. Uses a ring buffer
+// for O(1) eviction.
+func (p *Pipeline) recordKeys(units []provider.MigrationUnit) {
+	p.keyMu.Lock()
+	defer p.keyMu.Unlock()
+
+	cap := p.opts.MaxWrittenKeys
+
+	// Grow ring buffer if needed (e.g. after restore from checkpoint).
+	if cap > len(p.keyRing) {
+		newRing := make([]string, cap)
+		copy(newRing, p.keyRing)
+		p.keyRing = newRing
+	}
+
+	for _, u := range units {
+		if u.Table != "" && !p.tableSet[u.Table] {
+			p.tableSet[u.Table] = true
+			p.scannedTables = append(p.scannedTables, u.Table)
 		}
+		if p.writtenKeySet[u.Key] {
+			continue
+		}
+		p.writtenKeySet[u.Key] = true
+
+		// Evict oldest entry if ring is full.
+		if p.keyRingLen >= cap {
+			evictIdx := p.keyRingHead
+			delete(p.writtenKeySet, p.keyRing[evictIdx])
+			p.keyRingLen--
+			p.keysEvicted = true
+		}
+
+		// Insert at head position.
+		p.keyRing[p.keyRingHead] = u.Key
+		p.keyRingHead = (p.keyRingHead + 1) % cap
+		p.keyRingLen++
 	}
 
-	p.saveCheckpoint(ctx, lastWrittenBatch, scanner)
+	p.totalWritten += int64(len(units))
 }
+
+// writtenKeysFlat materialises the ring buffer as a flat slice for consumers
+// that need an ordered list (verification, checkpoint, resume token).
+func (p *Pipeline) writtenKeysFlat() []string {
+	if p.keyRingLen == 0 {
+		return nil
+	}
+	start := (p.keyRingHead - p.keyRingLen + len(p.keyRing)) % len(p.keyRing)
+	out := make([]string, p.keyRingLen)
+	for i := 0; i < p.keyRingLen; i++ {
+		out[i] = p.keyRing[(start+i)%len(p.keyRing)]
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint management
+// ---------------------------------------------------------------------------
+
+// maybeCheckpoint saves a checkpoint when the throttle interval has been met.
+func (p *Pipeline) maybeCheckpoint(ctx context.Context, batchID int, scanner provider.Scanner) {
+	p.cpMu.Lock()
+	p.batchesSinceCP++
+	shouldSave := p.opts.CheckpointInterval == 0 || p.batchesSinceCP >= p.opts.CheckpointInterval
+	if shouldSave {
+		p.batchesSinceCP = 0
+	}
+	p.cpMu.Unlock()
+
+	if shouldSave {
+		p.saveCheckpoint(ctx, batchID, scanner)
+	}
+}
+
+// saveCheckpoint persists the current migration progress.
+func (p *Pipeline) saveCheckpoint(ctx context.Context, batchID int, scanner provider.Scanner) {
+	p.cpMu.Lock()
+	defer p.cpMu.Unlock()
+
+	stats := scanner.Stats()
+
+	p.keyMu.Lock()
+	keysFlat := p.writtenKeysFlat()
+	totalWritten := p.totalWritten
+	p.keyMu.Unlock()
+
+	var token []byte
+	if stats.TotalScanned > 0 {
+		token = encodeResumeToken(p.config.Source.Provider, stats, keysFlat)
+	}
+
+	// Only include truly completed tables: tables whose scanner cursor was
+	// fully exhausted.  The scanner increments TablesDone when it closes a
+	// table's cursor, so scannedTables[:TablesDone] are the ones that are
+	// safe to skip on resume.  Tables beyond that index are in-progress and
+	// must NOT be skipped — the scanner will re-read them and dedup will
+	// prevent duplicate writes.
+	completedCount := stats.TablesDone
+	if completedCount > len(p.scannedTables) {
+		completedCount = len(p.scannedTables)
+	}
+	completedTables := make([]string, completedCount)
+	copy(completedTables, p.scannedTables[:completedCount])
+
+	// Track the in-progress table (if any) for diagnostics and future
+	// row-level resume support.
+	var lastTableScanning string
+	if completedCount < len(p.scannedTables) {
+		lastTableScanning = p.scannedTables[completedCount]
+	}
+
+	cp := &Checkpoint{
+		SourceProvider:    p.config.Source.Provider,
+		DestProvider:      p.config.Destination.Provider,
+		ConfigHash:        computeConfigHash(p.config),
+		StartTime:         p.startTime,
+		LastBatchID:       batchID,
+		TotalWritten:      totalWritten,
+		TablesCompleted:   completedTables,
+		LastTableScanning: lastTableScanning,
+		WrittenKeys:       keysFlat,
+		ResumeToken:       token,
+		Timestamp:         time.Now(),
+		Version:           checkpointVersion,
+	}
+
+	if err := p.checkpoint.Save(ctx, cp); err != nil {
+		logger.L().Warn("failed to save checkpoint", "error", err)
+	} else {
+		logger.L().Debug("checkpoint saved",
+			"batch", batchID,
+			"written", totalWritten,
+			"tables_completed", len(completedTables),
+			"keys_tracked", len(keysFlat),
+			"last_table", lastTableScanning,
+		)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Batch splitting
+// ---------------------------------------------------------------------------
+
+// splitBatch splits a slice of migration units into sub-batches when the
+// cumulative byte size exceeds maxBytes. If maxBytes is 0 the batch is
+// returned as-is.
+func splitBatch(units []provider.MigrationUnit, maxBytes int64) [][]provider.MigrationUnit {
+	if maxBytes <= 0 || len(units) == 0 {
+		return [][]provider.MigrationUnit{units}
+	}
+	var batches [][]provider.MigrationUnit
+	var current []provider.MigrationUnit
+	var currentBytes int64
+	for _, u := range units {
+		if len(current) > 0 && currentBytes+u.Size > maxBytes {
+			batches = append(batches, current)
+			current = nil
+			currentBytes = 0
+		}
+		current = append(current, u)
+		currentBytes += u.Size
+	}
+	if len(current) > 0 {
+		batches = append(batches, current)
+	}
+	return batches
+}
+
+// ---------------------------------------------------------------------------
+// Abort
+// ---------------------------------------------------------------------------
 
 // abort cleans up and returns an error result.
-func (p *Pipeline) abort(result *RunResult, err error) error {
+func (p *Pipeline) abort(err error) error {
 	p.reporter.OnPhaseChange(provider.PhaseError)
 	_ = p.tunnels.CloseAll()
 	return err
 }
+
+// ---------------------------------------------------------------------------
+// Tunnel config helpers
+// ---------------------------------------------------------------------------
 
 // buildTunnelConfigs creates tunnel configurations from the migration config.
 func (p *Pipeline) buildTunnelConfigs() map[string]tunnel.Config {
@@ -578,30 +1058,22 @@ func (p *Pipeline) buildTunnelConfigs() map[string]tunnel.Config {
 
 // resolveProviderConfig returns the provider-specific config struct,
 // with tunnel-resolved address if applicable.
-func (p *Pipeline) resolveProviderConfig(side string, connCfg *config.ConnectionConfig) any {
-	// If there's a tunnel, override the host/port with the local address
+func (p *Pipeline) resolveProviderConfig(side string, connCfg *config.ConnectionConfig) (any, error) {
 	addr := p.tunnels.ResolvedAddr(side)
-	if addr == "" {
-		// No tunnel — return the resolved config as-is
-		return providerConfig(connCfg)
-	}
-
-	// Tunnel active — create a copy with overridden host/port
-	// The specific provider config will be resolved by the provider's Connect method
-	return providerConfigWithAddr(connCfg, addr)
+	return config.ProviderConfigWithTunnel(connCfg, addr)
 }
 
-// shouldMigrateSchema returns true if schema migration should run.
+// ---------------------------------------------------------------------------
+// Schema migration
+// ---------------------------------------------------------------------------
+
+// shouldMigrateSchema returns true if schema migration should run,
+// based on the declared capabilities of both providers.
 func (p *Pipeline) shouldMigrateSchema() bool {
 	if !p.opts.MigrateSchema {
 		return false
 	}
-	// Only SQL databases support schema migration
-	src := p.config.Source.Provider
-	dst := p.config.Destination.Provider
-	isSQLSrc := src == "postgres" || src == "mysql" || src == "sqlite" || src == "mariadb" || src == "cockroachdb" || src == "mssql"
-	isSQLDst := dst == "postgres" || dst == "mysql" || dst == "sqlite" || dst == "mariadb" || dst == "cockroachdb" || dst == "mssql"
-	return isSQLSrc && isSQLDst
+	return provider.SupportsSchemaMigration(p.srcCaps, p.dstCaps)
 }
 
 // migrateSchema inspects the source schema and creates it on the destination.
@@ -610,7 +1082,11 @@ func (p *Pipeline) migrateSchema(ctx context.Context) error {
 
 	srcMigrator := p.src.SchemaMigrator(ctx)
 	if srcMigrator == nil {
-		log.Info("source has no schema migrator, skipping")
+		if p.srcCaps.Schema {
+			log.Warn("source claims schema support but returned nil migrator — schema migration silently skipped")
+		} else {
+			log.Info("source has no schema migrator, skipping")
+		}
 		return nil
 	}
 
@@ -625,16 +1101,35 @@ func (p *Pipeline) migrateSchema(ctx context.Context) error {
 		p.transformer.SetSchema(schema)
 	}
 
-	dstMigrator := p.dst.SchemaMigrator(ctx)
-	if dstMigrator == nil {
-		log.Info("destination has no schema migrator, skipping")
+	// NoSQL sources (e.g. MongoDB) produce collections without column
+	// definitions.  SQL destinations require at least one column to generate
+	// valid CREATE TABLE DDL.  Skip schema migration when the inspected
+	// schema has zero columns.
+	hasColumns := false
+	for _, t := range schema.Tables {
+		if len(t.Columns) > 0 {
+			hasColumns = true
+			break
+		}
+	}
+	if !hasColumns {
+		log.Info("source schema has no column definitions — skipping schema migration (NoSQL source)")
 		return nil
 	}
 
-	// If cross-database, use transformer's type mapper
+	dstMigrator := p.dst.SchemaMigrator(ctx)
+	if dstMigrator == nil {
+		if p.dstCaps.Schema {
+			log.Warn("destination claims schema support but returned nil migrator — schema migration silently skipped")
+		} else {
+			log.Info("destination has no schema migrator, skipping")
+		}
+		return nil
+	}
+
 	var mapper provider.TypeMapper
 	if p.config.IsCrossDB() {
-		if tm, ok := p.transformer.(interface{ TypeMapper() provider.TypeMapper }); ok {
+		if tm, ok := p.transformer.(transform.TypeMapperProvider); ok {
 			mapper = tm.TypeMapper()
 		}
 	}
@@ -645,32 +1140,6 @@ func (p *Pipeline) migrateSchema(ctx context.Context) error {
 
 	log.Info("schema created on destination")
 	return nil
-}
-
-// saveCheckpoint persists the current migration progress.
-func (p *Pipeline) saveCheckpoint(ctx context.Context, batchID int, scanner provider.Scanner) {
-	stats := scanner.Stats()
-
-	// Build resume token from scanner stats (provider-specific encoding).
-	// Each scanner's marshalScanStats encodes its cursor position.
-	var token []byte
-	if stats.TotalScanned > 0 {
-		token = encodeResumeToken(p.config.Source.Provider, stats, p.writtenKeys)
-	}
-
-	cp := &Checkpoint{
-		SourceProvider:  p.config.Source.Provider,
-		DestProvider:    p.config.Destination.Provider,
-		StartTime:       time.Now(), // TODO: use actual start time
-		LastBatchID:     batchID,
-		TablesCompleted: completedTables(stats),
-		ResumeToken:     token,
-		Timestamp:       time.Now(),
-	}
-
-	if err := p.checkpoint.Save(ctx, cp); err != nil {
-		logger.L().Warn("failed to save checkpoint", "error", err)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -747,38 +1216,6 @@ func portFromConnection(cfg config.ConnectionConfig) int {
 	return 0
 }
 
-func providerConfig(cfg *config.ConnectionConfig) any {
-	switch cfg.Provider {
-	case "redis":
-		return cfg.Redis
-	case "mongodb":
-		return cfg.MongoDB
-	case "postgres":
-		return cfg.Postgres
-	case "mysql":
-		return cfg.MySQL
-	case "sqlite":
-		return cfg.SQLite
-	case "mariadb":
-		return cfg.MariaDB
-	case "cockroachdb":
-		return cfg.CockroachDB
-	case "mssql":
-		return cfg.MSSQL
-	default:
-		return nil
-	}
-}
-
-func providerConfigWithAddr(cfg *config.ConnectionConfig, addr string) any {
-	// Return a map with the tunnel-resolved address
-	// Providers will handle the specific extraction
-	return map[string]string{
-		"tunnel_addr": addr,
-		"provider":    cfg.Provider,
-	}
-}
-
 func resumeToken(cp *Checkpoint) []byte {
 	if cp == nil {
 		return nil
@@ -798,17 +1235,6 @@ func tablesCompleted(cp *Checkpoint) []string {
 		return nil
 	}
 	return cp.TablesCompleted
-}
-
-func completedTables(stats provider.ScanStats) []string {
-	if stats.TablesDone == 0 {
-		return nil
-	}
-	result := make([]string, stats.TablesDone)
-	for i := range result {
-		result[i] = fmt.Sprintf("%d", i)
-	}
-	return result
 }
 
 // encodeResumeToken creates a provider-specific resume token from scan stats.
@@ -843,4 +1269,108 @@ func appendError(errors *[]error, max int, err error) {
 	if len(*errors) < max {
 		*errors = append(*errors, err)
 	}
+}
+
+// buildTransformerConfig constructs the TransformerConfig from MigrationConfig.
+func (p *Pipeline) buildTransformerConfig() transform.TransformerConfig {
+	tc := transform.TransformerConfig{
+		SrcDialect: transform.Dialect(p.config.Source.Provider),
+		DstDialect: transform.Dialect(p.config.Destination.Provider),
+	}
+
+	tc.NullHandler = &transform.NullHandler{
+		Policy: transform.NullPolicyFromString(p.config.Transform.NullPolicy),
+	}
+
+	if len(p.config.Transform.Mappings) > 0 {
+		tc.FieldMapping = transform.NewFieldMappingApplier(p.config.Transform.Mappings)
+	}
+
+	return tc
+}
+
+// computeConfigHash returns a deterministic hash of key config fields.
+// If the config or pipeline options change between runs, the checkpoint
+// is invalidated to prevent resuming with incompatible settings.
+func computeConfigHash(cfg *config.MigrationConfig) string {
+	h := sha256.New()
+
+	h.Write([]byte(cfg.Source.Provider))
+	h.Write([]byte{0})
+	h.Write([]byte(cfg.Destination.Provider))
+	h.Write([]byte{0})
+
+	h.Write([]byte(hostFromConnection(cfg.Source)))
+	h.Write([]byte{0})
+	fmt.Fprintf(h, "%d", portFromConnection(cfg.Source)) //nolint:errcheck
+	h.Write([]byte{0})
+	h.Write([]byte(dbFromConnection(cfg.Source)))
+	h.Write([]byte{0})
+	h.Write([]byte(hostFromConnection(cfg.Destination)))
+	h.Write([]byte{0})
+	fmt.Fprintf(h, "%d", portFromConnection(cfg.Destination)) //nolint:errcheck
+	h.Write([]byte{0})
+	h.Write([]byte(dbFromConnection(cfg.Destination)))
+	h.Write([]byte{0})
+
+	// Pipeline options that affect correctness of resume.
+	fmt.Fprintf(h, "%d", cfg.Pipeline.BatchSize) //nolint:errcheck
+	h.Write([]byte{0})
+	h.Write([]byte(string(cfg.Pipeline.ConflictStrategy)))
+	h.Write([]byte{0})
+	h.Write([]byte(cfg.Pipeline.FKHandling))
+	h.Write([]byte{0})
+
+	for table, mappings := range cfg.Transform.Mappings {
+		h.Write([]byte(table))
+		h.Write([]byte{0})
+		for _, m := range mappings {
+			h.Write([]byte(m.Source))
+			h.Write([]byte{0})
+			h.Write([]byte(m.Destination))
+			h.Write([]byte{0})
+		}
+	}
+	h.Write([]byte{0})
+
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// dbFromConnection returns the database name from connection config.
+func dbFromConnection(cfg config.ConnectionConfig) string {
+	switch cfg.Provider {
+	case "redis":
+		if cfg.Redis != nil {
+			return fmt.Sprintf("%d", cfg.Redis.DB)
+		}
+	case "mongodb":
+		if cfg.MongoDB != nil {
+			return cfg.MongoDB.Database
+		}
+	case "postgres":
+		if cfg.Postgres != nil {
+			return cfg.Postgres.Database
+		}
+	case "mysql":
+		if cfg.MySQL != nil {
+			return cfg.MySQL.Database
+		}
+	case "mariadb":
+		if cfg.MariaDB != nil {
+			return cfg.MariaDB.Database
+		}
+	case "cockroachdb":
+		if cfg.CockroachDB != nil {
+			return cfg.CockroachDB.Database
+		}
+	case "mssql":
+		if cfg.MSSQL != nil {
+			return cfg.MSSQL.Database
+		}
+	case "sqlite":
+		if cfg.SQLite != nil {
+			return cfg.SQLite.Path
+		}
+	}
+	return ""
 }

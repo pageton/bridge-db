@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/pageton/bridge-db/internal/config"
+	"github.com/pageton/bridge-db/internal/verify"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
@@ -29,6 +30,17 @@ type RunResult struct {
 
 	// Resumed is true if this run resumed from a previous checkpoint.
 	Resumed bool
+
+	// Plan is the migration plan built before data movement. Populated in
+	// step 5 (stepPlan). Available for dry-run output and debugging.
+	Plan *MigrationPlan
+
+	// Failures is the aggregated categorized error summary.
+	Failures *FailureSummary
+
+	// VerificationReport is the detailed verification report from step 9.
+	// Nil when verification was disabled or not applicable.
+	VerificationReport *verify.VerificationReport
 }
 
 // PhaseResult records timing and outcome for a single pipeline phase.

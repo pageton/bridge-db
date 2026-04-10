@@ -2,14 +2,17 @@ package bridge
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/bytedance/sonic"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bytedance/sonic"
 )
 
 // Checkpoint records migration progress so it can be resumed after interruption.
@@ -20,20 +23,121 @@ type Checkpoint struct {
 	// DestProvider is the destination database provider name.
 	DestProvider string `json:"dest_provider"`
 
+	// ConfigHash is a hash of key config fields, used to detect incompatible changes
+	// between the original and resumed runs.
+	ConfigHash string `json:"config_hash"`
+
 	// StartTime is when the original migration began.
 	StartTime time.Time `json:"start_time"`
 
 	// LastBatchID is the ID of the last successfully written batch.
 	LastBatchID int `json:"last_batch_id"`
 
-	// TablesCompleted lists tables/collections that have been fully migrated.
+	// TotalWritten is the cumulative count of units written to the destination.
+	TotalWritten int64 `json:"total_written"`
+
+	// TablesCompleted lists tables/collections whose scanner cursor was fully
+	// exhausted AND all rows were written.  On resume, scanners skip these
+	// tables entirely via name-based filtering.  Partially-scanned tables are
+	// NOT included — they will be re-scanned and dedup prevents duplicate writes.
 	TablesCompleted []string `json:"tables_completed"`
+
+	// LastTableScanning is the table that was in progress when the checkpoint
+	// was saved. Empty when the last save happened at a table boundary.
+	LastTableScanning string `json:"last_table_scanning,omitempty"`
+
+	// RowsScannedInTable tracks how many rows were scanned in the current table
+	// before the checkpoint was saved. Used for diagnostics and future mid-table
+	// resume support.
+	RowsScannedInTable int64 `json:"rows_scanned_in_table,omitempty"`
+
+	// WrittenKeys is a set of keys written to the destination since the last
+	// fully-completed table.  Used for duplicate write prevention on resume.
+	// Only keys from in-progress and subsequent tables are retained; keys from
+	// fully-completed tables are not needed since those tables are skipped by
+	// name on resume.
+	WrittenKeys []string `json:"written_keys,omitempty"`
 
 	// ResumeToken is an opaque cursor for resuming the scanner.
 	ResumeToken []byte `json:"resume_token,omitempty"`
 
 	// Timestamp is when this checkpoint was saved.
 	Timestamp time.Time `json:"timestamp"`
+
+	// Version is the checkpoint schema version.
+	Version int `json:"version"`
+
+	// Checksum is a SHA-256 over the checkpoint content (excluding this field)
+	// for detecting file corruption or partial writes.
+	Checksum string `json:"checksum,omitempty"`
+}
+
+const checkpointVersion = 3
+
+// minSupportedVersion is the oldest checkpoint version that can be loaded.
+// v1 and v2 checkpoints used a different TablesCompleted semantics (included
+// partially-scanned tables) and are rejected to prevent silent data loss.
+const minSupportedVersion = 3
+
+// Validate checks a loaded checkpoint for consistency.
+func (cp *Checkpoint) Validate() error {
+	if cp.SourceProvider == "" {
+		return errors.New("checkpoint missing source_provider")
+	}
+	if cp.DestProvider == "" {
+		return errors.New("checkpoint missing dest_provider")
+	}
+	if cp.StartTime.IsZero() {
+		return errors.New("checkpoint missing start_time")
+	}
+	if cp.Version < minSupportedVersion {
+		return fmt.Errorf("checkpoint version %d is too old (minimum supported: %d). "+
+			"Delete the checkpoint file to start a fresh migration",
+			cp.Version, minSupportedVersion)
+	}
+	if cp.Version > checkpointVersion {
+		return fmt.Errorf("checkpoint version %d is newer than supported (%d). "+
+			"Upgrade bridge-db to resume this migration",
+			cp.Version, checkpointVersion)
+	}
+	return nil
+}
+
+// computeChecksum returns a SHA-256 hash over all checkpoint fields except
+// the Checksum field itself. Used to detect file corruption.
+func (cp *Checkpoint) computeChecksum() string {
+	h := sha256.New()
+	h.Write([]byte(cp.SourceProvider))
+	h.Write([]byte{0})
+	h.Write([]byte(cp.DestProvider))
+	h.Write([]byte{0})
+	h.Write([]byte(cp.ConfigHash))
+	h.Write([]byte{0})
+	h.Write([]byte(cp.StartTime.Format(time.RFC3339Nano)))
+	h.Write([]byte{0})
+	// Write numeric fields as fixed-width.
+	fmt.Fprintf(h, "%d", cp.LastBatchID) //nolint:errcheck
+	h.Write([]byte{0})
+	fmt.Fprintf(h, "%d", cp.TotalWritten) //nolint:errcheck
+	h.Write([]byte{0})
+	for _, t := range cp.TablesCompleted {
+		h.Write([]byte(t))
+		h.Write([]byte{0})
+	}
+	h.Write([]byte(cp.LastTableScanning))
+	h.Write([]byte{0})
+	fmt.Fprintf(h, "%d", cp.RowsScannedInTable) //nolint:errcheck
+	h.Write([]byte{0})
+	for _, k := range cp.WrittenKeys {
+		h.Write([]byte(k))
+		h.Write([]byte{0})
+	}
+	h.Write(cp.ResumeToken)
+	h.Write([]byte{0})
+	h.Write([]byte(cp.Timestamp.Format(time.RFC3339Nano)))
+	h.Write([]byte{0})
+	fmt.Fprintf(h, "%d", cp.Version) //nolint:errcheck
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // CheckpointStore persists migration checkpoints.
@@ -72,6 +176,9 @@ func NewFileCheckpointStore(path string) (*FileCheckpointStore, error) {
 func (s *FileCheckpointStore) Save(_ context.Context, cp *Checkpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Compute and set checksum before serializing.
+	cp.Checksum = cp.computeChecksum()
 
 	data, err := sonic.MarshalIndent(cp, "", "  ")
 	if err != nil {
@@ -116,8 +223,22 @@ func (s *FileCheckpointStore) Load(_ context.Context) (*Checkpoint, error) {
 
 	var cp Checkpoint
 	if err := sonic.Unmarshal(data, &cp); err != nil {
-		// Corrupt checkpoint — log warning and start fresh
 		return nil, fmt.Errorf("parse checkpoint (will start fresh): %w", err)
+	}
+
+	// Validate loaded checkpoint.
+	if err := cp.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid checkpoint: %w", err)
+	}
+
+	// Verify checksum (if present in the file).
+	if cp.Checksum != "" {
+		expected := cp.computeChecksum()
+		if cp.Checksum != expected {
+			return nil, fmt.Errorf("checkpoint checksum mismatch (file may be corrupted). "+
+				"Expected %s, got %s. Delete the checkpoint file to start fresh",
+				expected[:8], cp.Checksum[:8])
+		}
 	}
 
 	return &cp, nil
