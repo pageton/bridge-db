@@ -15,7 +15,9 @@ func init() {
 	})
 }
 
-type MongoToRedisTransformer struct{}
+type MongoToRedisTransformer struct {
+	cfg TransformerConfig
+}
 
 func (t *MongoToRedisTransformer) Transform(_ context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
 	result := make([]provider.MigrationUnit, 0, len(units))
@@ -85,5 +87,6 @@ func (t *MongoToRedisTransformer) transformUnit(unit provider.MigrationUnit) (pr
 	}, nil
 }
 
-func (t *MongoToRedisTransformer) NeedsSchema() bool            { return false }
-func (t *MongoToRedisTransformer) SetSchema(_ *provider.Schema) {}
+func (t *MongoToRedisTransformer) NeedsSchema() bool               { return false }
+func (t *MongoToRedisTransformer) SetSchema(_ *provider.Schema)    {}
+func (t *MongoToRedisTransformer) Configure(cfg TransformerConfig) { t.cfg = cfg }

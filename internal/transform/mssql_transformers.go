@@ -2,10 +2,8 @@ package transform
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
-	"github.com/bytedance/sonic"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
@@ -37,16 +35,28 @@ func init() {
 type mssqlPassthroughTransformer struct {
 	src string
 	dst string
+	cfg TransformerConfig
 }
 
-func (t *mssqlPassthroughTransformer) Transform(_ context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
+func (t *mssqlPassthroughTransformer) Transform(ctx context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
+	pipe := NewStagePipeline(
+		NullHandlingStage(&t.cfg),
+		FieldMappingStage(&t.cfg),
+	)
+
+	var err error
+	units, err = pipe.Transform(ctx, units)
+	if err != nil {
+		return nil, err
+	}
+
 	switch t.dst {
 	case "redis":
-		return mssqlToRedis(units)
+		return SQLToRedis(units, &t.cfg)
 	case "mongodb":
-		return mssqlToMongoDB(units)
+		return SQLToMongoDB(units, &t.cfg)
 	case "sqlite":
-		return mssqlToSQLite(units)
+		return AdjustSchemaField(units, false, "")
 	default:
 		return units, nil
 	}
@@ -57,113 +67,7 @@ func (t *mssqlPassthroughTransformer) SetSchema(_ *provider.Schema) {}
 func (t *mssqlPassthroughTransformer) TypeMapper() provider.TypeMapper {
 	return mssqlTypeMapper{src: t.src, dst: t.dst}
 }
-
-func mssqlToRedis(units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
-	result := make([]provider.MigrationUnit, 0, len(units))
-	for _, unit := range units {
-		var envelope map[string]any
-		if err := sonic.Unmarshal(unit.Data, &envelope); err != nil {
-			continue
-		}
-		data, _ := envelope["data"].(map[string]any)
-		if data == nil {
-			continue
-		}
-		fields := make(map[string]any)
-		for k, v := range data {
-			switch val := v.(type) {
-			case map[string]any, []any:
-				b, _ := sonic.Marshal(val)
-				fields[k] = string(b)
-			default:
-				fields[k] = v
-			}
-		}
-		redisEnvelope := map[string]any{
-			"type":        "hash",
-			"value":       fields,
-			"ttl_seconds": 0,
-		}
-		encoded, err := sonic.Marshal(redisEnvelope)
-		if err != nil {
-			continue
-		}
-		result = append(result, provider.MigrationUnit{
-			Key: unit.Key, Table: unit.Table,
-			DataType: provider.DataTypeHash,
-			Data:     encoded, Size: int64(len(encoded)),
-		})
-	}
-	return result, nil
-}
-
-func mssqlToMongoDB(units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
-	result := make([]provider.MigrationUnit, 0, len(units))
-	for _, unit := range units {
-		var envelope map[string]any
-		if err := sonic.Unmarshal(unit.Data, &envelope); err != nil {
-			continue
-		}
-		data, _ := envelope["data"].(map[string]any)
-		table, _ := envelope["table"].(string)
-		if data == nil || table == "" {
-			continue
-		}
-		pk, _ := envelope["primary_key"].(map[string]any)
-		docID := "unknown"
-		if len(pk) > 0 {
-			for _, v := range pk {
-				s := fmt.Sprintf("%v", v)
-				s = strings.ReplaceAll(s, " ", "_")
-				s = strings.ReplaceAll(s, ":", "_")
-				s = strings.ReplaceAll(s, ".", "_")
-				s = strings.ReplaceAll(s, "/", "_")
-				docID = s
-				break
-			}
-		}
-		doc := make(map[string]any, len(data))
-		for k, v := range data {
-			doc[k] = v
-		}
-		doc["_id"] = unit.Key
-		mongoEnvelope := map[string]any{
-			"collection":  table,
-			"document_id": docID,
-			"document":    doc,
-		}
-		encoded, err := sonic.Marshal(mongoEnvelope)
-		if err != nil {
-			continue
-		}
-		result = append(result, provider.MigrationUnit{
-			Key: unit.Key, Table: table,
-			DataType: provider.DataTypeDocument,
-			Data:     encoded, Size: int64(len(encoded)),
-		})
-	}
-	return result, nil
-}
-
-func mssqlToSQLite(units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
-	result := make([]provider.MigrationUnit, len(units))
-	for i, unit := range units {
-		var envelope map[string]any
-		if err := sonic.Unmarshal(unit.Data, &envelope); err != nil {
-			result[i] = unit
-			continue
-		}
-		delete(envelope, "schema")
-		encoded, err := sonic.Marshal(envelope)
-		if err != nil {
-			result[i] = unit
-			continue
-		}
-		unit.Data = encoded
-		result[i] = unit
-	}
-	return result, nil
-}
+func (t *mssqlPassthroughTransformer) Configure(cfg TransformerConfig) { t.cfg = cfg }
 
 type mssqlTypeMapper struct {
 	src string

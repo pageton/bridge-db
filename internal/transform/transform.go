@@ -1,4 +1,3 @@
-// Package transform defines the cross-database transformation interfaces.
 package transform
 
 import (
@@ -21,6 +20,14 @@ type Transformer interface {
 	SetSchema(schema *provider.Schema)
 }
 
+// IsNoopTransformer returns true if the transformer is a no-op passthrough
+// (same-database migration where no data conversion is needed).
+// Used by the pipeline to skip the transform phase.
+func IsNoopTransformer(t Transformer) bool {
+	_, ok := t.(NoopTransformer)
+	return ok
+}
+
 // NoopTransformer is a passthrough transformer used for same-database migrations.
 type NoopTransformer struct{}
 
@@ -29,3 +36,17 @@ func (NoopTransformer) Transform(_ context.Context, units []provider.MigrationUn
 }
 func (NoopTransformer) NeedsSchema() bool            { return false }
 func (NoopTransformer) SetSchema(_ *provider.Schema) {}
+
+// ConfigurableTransformer is an optional interface that transformers implement
+// to receive runtime configuration (null policy, field mappings, dialect hints).
+type ConfigurableTransformer interface {
+	Transformer
+	Configure(cfg TransformerConfig)
+}
+
+// TypeMapperProvider is an optional interface for transformers that provide
+// type mapping for schema migration.
+type TypeMapperProvider interface {
+	Transformer
+	TypeMapper() provider.TypeMapper
+}

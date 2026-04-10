@@ -3,9 +3,7 @@ package transform
 import (
 	"context"
 	"strings"
-	"time"
 
-	"github.com/bytedance/sonic"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
@@ -19,72 +17,37 @@ func init() {
 }
 
 // MySQLToPostgresTransformer converts MySQL rows to PostgreSQL format.
+// Applies: null handling → field mapping → timestamp conversion → schema field addition.
 type MySQLToPostgresTransformer struct {
-	schema *provider.Schema
+	schema   *provider.Schema
+	cfg      TransformerConfig
+	pipeline *StagePipeline
 }
 
 func (t *MySQLToPostgresTransformer) Transform(ctx context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
-	dtCols := t.datetimeColumns()
-	result := make([]provider.MigrationUnit, len(units))
-
-	for i, unit := range units {
-		var envelope map[string]any
-		if err := sonic.Unmarshal(unit.Data, &envelope); err != nil {
-			result[i] = unit
-			continue
-		}
-
-		if _, ok := envelope["schema"]; !ok {
-			envelope["schema"] = "public"
-		}
-
-		if len(dtCols) > 0 {
-			data, ok := envelope["data"].(map[string]any)
-			if ok {
-				for _, col := range dtCols {
-					val, ok := data[col]
-					if !ok {
-						continue
-					}
-					s, ok := val.(string)
-					if !ok {
-						continue
-					}
-					t, err := time.Parse("2006-01-02 15:04:05", s)
-					if err != nil {
-						continue
-					}
-					data[col] = t.Format(time.RFC3339Nano)
-				}
-			}
-		}
-
-		encoded, err := sonic.Marshal(envelope)
-		if err != nil {
-			result[i] = unit
-			continue
-		}
-		unit.Data = encoded
-		result[i] = unit
+	if t.pipeline == nil {
+		t.buildPipeline()
 	}
-
-	return result, nil
+	return t.pipeline.Transform(ctx, units)
 }
 
-func (t *MySQLToPostgresTransformer) datetimeColumns() []string {
-	if t.schema == nil {
-		return nil
+func (t *MySQLToPostgresTransformer) buildPipeline() {
+	var stages []TransformStage
+
+	// Null handling + field mapping.
+	stages = append(stages, NullHandlingStage(&t.cfg))
+	stages = append(stages, FieldMappingStage(&t.cfg))
+
+	// Timestamp conversion: MySQL datetime → PostgreSQL RFC3339.
+	if t.schema != nil && hasDatetimeColumns(t.schema) {
+		stages = append(stages, TimestampConversionStage(t.schema, DialectMySQL, DialectPostgres))
 	}
-	var cols []string
-	for _, tbl := range t.schema.Tables {
-		for _, col := range tbl.Columns {
-			upper := strings.ToUpper(col.Type)
-			if strings.HasPrefix(upper, "DATETIME") || strings.HasPrefix(upper, "TIMESTAMP") {
-				cols = append(cols, col.Name)
-			}
-		}
-	}
-	return cols
+
+	// Add schema="public" field for PostgreSQL.
+	stages = append(stages, SchemaFieldStage(true, "public"))
+
+	t.pipeline = NewStagePipeline(stages...)
+	t.pipeline.desc = []string{"null_handling", "field_mapping", "timestamp_conversion", "schema_field"}
 }
 
 func (t *MySQLToPostgresTransformer) NeedsSchema() bool {
@@ -93,85 +56,50 @@ func (t *MySQLToPostgresTransformer) NeedsSchema() bool {
 
 func (t *MySQLToPostgresTransformer) SetSchema(schema *provider.Schema) {
 	t.schema = schema
+	t.pipeline = nil // rebuild with new schema
 }
 
 func (t *MySQLToPostgresTransformer) TypeMapper() provider.TypeMapper {
 	return MySQLToPostgresTypeMapper{}
 }
 
+func (t *MySQLToPostgresTransformer) Configure(cfg TransformerConfig) {
+	t.cfg = cfg
+	t.pipeline = nil // rebuild with new config
+}
+
 // PostgresToMySQLTransformer converts PostgreSQL rows to MySQL format.
+// Applies: null handling → field mapping → timestamp conversion → schema field removal.
 type PostgresToMySQLTransformer struct {
-	schema *provider.Schema
+	schema   *provider.Schema
+	cfg      TransformerConfig
+	pipeline *StagePipeline
 }
 
 func (t *PostgresToMySQLTransformer) Transform(ctx context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
-	tsCols := t.timestampColumns()
-	if len(tsCols) == 0 {
-		return units, nil
+	if t.pipeline == nil {
+		t.buildPipeline()
 	}
-
-	result := make([]provider.MigrationUnit, len(units))
-	for i, unit := range units {
-		var envelope map[string]any
-		if err := sonic.Unmarshal(unit.Data, &envelope); err != nil {
-			result[i] = unit
-			continue
-		}
-
-		data, ok := envelope["data"].(map[string]any)
-		if !ok {
-			result[i] = unit
-			continue
-		}
-
-		changed := false
-		for _, col := range tsCols {
-			val, ok := data[col]
-			if !ok {
-				continue
-			}
-			s, ok := val.(string)
-			if !ok {
-				continue
-			}
-			parsed, err := time.Parse(time.RFC3339Nano, s)
-			if err != nil {
-				continue
-			}
-			data[col] = parsed.Format("2006-01-02 15:04:05")
-			changed = true
-		}
-
-		if changed {
-			envelope["data"] = data
-			encoded, err := sonic.Marshal(envelope)
-			if err != nil {
-				result[i] = unit
-				continue
-			}
-			unit.Data = encoded
-		}
-
-		result[i] = unit
-	}
-
-	return result, nil
+	return t.pipeline.Transform(ctx, units)
 }
 
-func (t *PostgresToMySQLTransformer) timestampColumns() []string {
-	if t.schema == nil {
-		return nil
+func (t *PostgresToMySQLTransformer) buildPipeline() {
+	var stages []TransformStage
+
+	// Null handling + field mapping.
+	stages = append(stages, NullHandlingStage(&t.cfg))
+	stages = append(stages, FieldMappingStage(&t.cfg))
+
+	// Timestamp conversion: PostgreSQL RFC3339 → MySQL datetime.
+	if t.schema != nil && hasTimestampColumns(t.schema) {
+		stages = append(stages, TimestampConversionStage(t.schema, DialectPostgres, DialectMySQL))
 	}
-	var cols []string
-	for _, tbl := range t.schema.Tables {
-		for _, col := range tbl.Columns {
-			upper := strings.ToUpper(col.Type)
-			if strings.HasPrefix(upper, "TIMESTAMP") || strings.HasPrefix(upper, "TIMESTAMPTZ") {
-				cols = append(cols, col.Name)
-			}
-		}
-	}
-	return cols
+
+	// Remove schema field for MySQL.
+	stages = append(stages, SchemaFieldStage(false, ""))
+
+	t.pipeline = NewStagePipeline(stages...)
+	t.pipeline.desc = []string{"null_handling", "field_mapping", "timestamp_conversion", "schema_field"}
 }
 
 func (t *PostgresToMySQLTransformer) NeedsSchema() bool {
@@ -180,11 +108,50 @@ func (t *PostgresToMySQLTransformer) NeedsSchema() bool {
 
 func (t *PostgresToMySQLTransformer) SetSchema(schema *provider.Schema) {
 	t.schema = schema
+	t.pipeline = nil // rebuild with new schema
 }
 
 func (t *PostgresToMySQLTransformer) TypeMapper() provider.TypeMapper {
 	return PostgresToMySQLTypeMapper{}
 }
+
+func (t *PostgresToMySQLTransformer) Configure(cfg TransformerConfig) {
+	t.cfg = cfg
+	t.pipeline = nil // rebuild with new config
+}
+
+// ---------------------------------------------------------------------------
+// Helper predicates
+// ---------------------------------------------------------------------------
+
+// hasDatetimeColumns returns true if any table has DATETIME or TIMESTAMP columns.
+func hasDatetimeColumns(schema *provider.Schema) bool {
+	for _, tbl := range schema.Tables {
+		for _, col := range tbl.Columns {
+			if IsTimestampColumn(col.Type) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasTimestampColumns returns true if any table has TIMESTAMP or TIMESTAMPTZ columns.
+func hasTimestampColumns(schema *provider.Schema) bool {
+	for _, tbl := range schema.Tables {
+		for _, col := range tbl.Columns {
+			upper := strings.ToUpper(col.Type)
+			if strings.HasPrefix(upper, "TIMESTAMP") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// Type mappers
+// ---------------------------------------------------------------------------
 
 // MySQLToPostgresTypeMapper maps MySQL types to PostgreSQL types.
 type MySQLToPostgresTypeMapper struct{}

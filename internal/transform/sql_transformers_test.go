@@ -2,8 +2,9 @@ package transform
 
 import (
 	"context"
-	"github.com/bytedance/sonic"
 	"testing"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/pageton/bridge-db/pkg/provider"
 )
@@ -69,6 +70,129 @@ func TestMySQLToPostgres_AddsSchemaField(t *testing.T) {
 	}
 	if env["schema"] != "public" {
 		t.Errorf("expected schema='public', got %v", env["schema"])
+	}
+}
+
+func TestMongoDBToPostgres_AddsPublicSchema(t *testing.T) {
+	tr := GetTransformer("mongodb", "postgres")
+
+	env := map[string]any{
+		"collection": "users",
+		"document": map[string]any{
+			"_id":   "507f1f77bcf86cd799439011",
+			"name":  "alice",
+			"roles": []any{"admin", "user"},
+		},
+	}
+	b, _ := sonic.Marshal(env)
+	units := []provider.MigrationUnit{{
+		Key:      "507f1f77bcf86cd799439011",
+		Table:    "users",
+		DataType: provider.DataTypeDocument,
+		Data:     b,
+	}}
+
+	result, err := tr.Transform(context.Background(), units)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result unit, got %d", len(result))
+	}
+
+	var got map[string]any
+	if err := sonic.Unmarshal(result[0].Data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["schema"] != "public" {
+		t.Fatalf("schema = %v, want public", got["schema"])
+	}
+	if got["table"] != "users" {
+		t.Fatalf("table = %v, want users", got["table"])
+	}
+
+	pk, ok := got["primary_key"].(map[string]any)
+	if !ok {
+		t.Fatalf("primary_key type = %T, want map[string]any", got["primary_key"])
+	}
+	if pk["_id"] != "507f1f77bcf86cd799439011" {
+		t.Fatalf("primary_key._id = %v", pk["_id"])
+	}
+
+	data, ok := got["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data type = %T, want map[string]any", got["data"])
+	}
+	if data["name"] != "alice" {
+		t.Fatalf("data.name = %v, want alice", data["name"])
+	}
+	if _, ok := data["roles"].(string); !ok {
+		t.Fatalf("data.roles should be JSON string, got %T", data["roles"])
+	}
+
+	colTypes, ok := got["column_types"].(map[string]any)
+	if !ok {
+		t.Fatalf("column_types type = %T, want map[string]any", got["column_types"])
+	}
+	if colTypes["name"] != "TEXT" {
+		t.Fatalf("column_types.name = %v, want TEXT", colTypes["name"])
+	}
+}
+
+func TestMySQLToCockroachDB_AddsPublicSchema(t *testing.T) {
+	tr := GetTransformer("mysql", "cockroachdb")
+	data := mysqlRowEnvelope("orders", map[string]any{"id": 1.0}, map[string]any{"status": "open"}, map[string]any{"status": "varchar(50)"})
+	units := []provider.MigrationUnit{{Key: "orders:1", Data: data}}
+
+	result, err := tr.Transform(context.Background(), units)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var env map[string]any
+	if err := sonic.Unmarshal(result[0].Data, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env["schema"] != "public" {
+		t.Fatalf("expected schema='public', got %v", env["schema"])
+	}
+}
+
+func TestMongoDBToCockroachDB_AddsPublicSchema(t *testing.T) {
+	tr := GetTransformer("mongodb", "cockroachdb")
+
+	env := map[string]any{
+		"collection": "users",
+		"document": map[string]any{
+			"_id":  "507f1f77bcf86cd799439011",
+			"name": "alice",
+		},
+	}
+	b, _ := sonic.Marshal(env)
+	units := []provider.MigrationUnit{{
+		Key:      "507f1f77bcf86cd799439011",
+		Table:    "users",
+		DataType: provider.DataTypeDocument,
+		Data:     b,
+	}}
+
+	result, err := tr.Transform(context.Background(), units)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result unit, got %d", len(result))
+	}
+
+	var got map[string]any
+	if err := sonic.Unmarshal(result[0].Data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["schema"] != "public" {
+		t.Fatalf("schema = %v, want public", got["schema"])
+	}
+	if got["table"] != "users" {
+		t.Fatalf("table = %v, want users", got["table"])
 	}
 }
 
@@ -212,22 +336,47 @@ func TestMySQLToPostgres_NeedsSchema(t *testing.T) {
 	}
 }
 
-func TestMySQLToPostgres_datetimeColumns_NilSchema(t *testing.T) {
+func TestMySQLToPostgres_NilSchema_NoCrash(t *testing.T) {
 	tr := &MySQLToPostgresTransformer{}
-	cols := tr.datetimeColumns()
-	if cols != nil {
-		t.Error("nil schema should return nil columns")
+	data := mysqlRowEnvelope("t",
+		map[string]any{"id": 1.0},
+		map[string]any{"status": "ok"},
+		map[string]any{"status": "VARCHAR(50)"},
+	)
+	result, err := tr.Transform(context.Background(), []provider.MigrationUnit{{Key: "t:1", Data: data}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var env map[string]any
+	if err := sonic.Unmarshal(result[0].Data, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env["schema"] != "public" {
+		t.Errorf("schema should still be added even with nil schema, got %v", env["schema"])
 	}
 }
 
-func TestMySQLToPostgres_datetimeColumns_NoDatetimeColumns(t *testing.T) {
+func TestMySQLToPostgres_NoDatetimeColumns_Passthrough(t *testing.T) {
 	tr := &MySQLToPostgresTransformer{}
 	tr.SetSchema(makeSchema([]tableDef{
 		{name: "t", columns: []colDef{{name: "id", typ: "INT"}, {name: "name", typ: "VARCHAR(50)"}}},
 	}))
-	cols := tr.datetimeColumns()
-	if len(cols) != 0 {
-		t.Errorf("expected 0 datetime columns, got %d", len(cols))
+	data := mysqlRowEnvelope("t",
+		map[string]any{"id": 1.0},
+		map[string]any{"id": 1.0, "name": "alice"},
+		map[string]any{"id": "INT", "name": "VARCHAR(50)"},
+	)
+	result, err := tr.Transform(context.Background(), []provider.MigrationUnit{{Key: "t:1", Data: data}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var env map[string]any
+	if err := sonic.Unmarshal(result[0].Data, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	rowData := env["data"].(map[string]any)
+	if rowData["name"] != "alice" {
+		t.Error("non-datetime data should pass through unchanged")
 	}
 }
 
@@ -290,8 +439,17 @@ func TestPostgresToMySQL_NoTimestampColumns_Passthrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if string(result[0].Data) != string(data) {
-		t.Error("data without timestamp columns should pass through unchanged")
+	var env map[string]any
+	if err := sonic.Unmarshal(result[0].Data, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Data should be preserved (no timestamp conversion), schema field removed.
+	if _, ok := env["schema"]; ok {
+		t.Error("schema field should be removed for MySQL destination")
+	}
+	rowData := env["data"].(map[string]any)
+	if rowData["id"] != 1.0 {
+		t.Error("data values should pass through unchanged")
 	}
 }
 
@@ -366,9 +524,19 @@ func TestPostgresToMySQL_MissingDataField(t *testing.T) {
 	}
 	b, _ := sonic.Marshal(env)
 
-	result, _ := tr.Transform(context.Background(), []provider.MigrationUnit{{Key: "t:1", Data: b}})
-	if string(result[0].Data) != string(b) {
-		t.Error("missing data field should pass through unchanged")
+	result, err := tr.Transform(context.Background(), []provider.MigrationUnit{{Key: "t:1", Data: b}})
+	if err != nil {
+		t.Fatalf("missing data field should not error: %v", err)
+	}
+	var got map[string]any
+	if err := sonic.Unmarshal(result[0].Data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["table"] != "t" {
+		t.Error("envelope should still have table field")
+	}
+	if _, ok := got["schema"]; ok {
+		t.Error("schema field should be removed")
 	}
 }
 
@@ -379,11 +547,19 @@ func TestPostgresToMySQL_NeedsSchema(t *testing.T) {
 	}
 }
 
-func TestPostgresToMySQL_timestampColumns_NilSchema(t *testing.T) {
+func TestPostgresToMySQL_NilSchema_NoCrash(t *testing.T) {
 	tr := &PostgresToMySQLTransformer{}
-	cols := tr.timestampColumns()
-	if cols != nil {
-		t.Error("nil schema should return nil columns")
+	data := pgRowEnvelope("t", "public",
+		map[string]any{"id": 1.0},
+		map[string]any{"status": "ok"},
+		map[string]any{"status": "TEXT"},
+	)
+	result, err := tr.Transform(context.Background(), []provider.MigrationUnit{{Key: "t:1", Data: data}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result))
 	}
 }
 
@@ -421,26 +597,6 @@ func TestPostgresToMySQL_MultipleUnits(t *testing.T) {
 		if ts := rowData["ts"].(string); ts != "2024-01-15 10:30:00" {
 			t.Errorf("unit %d: ts=%q, want MySQL format", i, ts)
 		}
-	}
-}
-
-func TestMySQLToPostgres_NilSchemaNoCrash(t *testing.T) {
-	tr := &MySQLToPostgresTransformer{}
-	data := mysqlRowEnvelope("t",
-		map[string]any{"id": 1.0},
-		map[string]any{"status": "ok"},
-		map[string]any{"status": "VARCHAR(50)"},
-	)
-	result, err := tr.Transform(context.Background(), []provider.MigrationUnit{{Key: "t:1", Data: data}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	var env map[string]any
-	if err := sonic.Unmarshal(result[0].Data, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if env["schema"] != "public" {
-		t.Errorf("schema should still be added even with nil schema, got %v", env["schema"])
 	}
 }
 

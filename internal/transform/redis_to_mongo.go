@@ -2,6 +2,7 @@ package transform
 
 import (
 	"context"
+	"maps"
 	"strings"
 
 	"github.com/bytedance/sonic"
@@ -15,7 +16,9 @@ func init() {
 	})
 }
 
-type RedisToMongoDBTransformer struct{}
+type RedisToMongoDBTransformer struct {
+	cfg TransformerConfig
+}
 
 func (t *RedisToMongoDBTransformer) Transform(_ context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
 	result := make([]provider.MigrationUnit, 0, len(units))
@@ -65,9 +68,7 @@ func (t *RedisToMongoDBTransformer) transformHash(key, collection string, value 
 	}
 
 	doc := make(map[string]any, len(fields)+1)
-	for k, v := range fields {
-		doc[k] = v
-	}
+	maps.Copy(doc, fields)
 	doc["_id"] = key
 
 	return []provider.MigrationUnit{buildMongoUnit(key, collection, doc)}
@@ -176,5 +177,6 @@ func collectionFromKey(key string) string {
 	return parts[0]
 }
 
-func (t *RedisToMongoDBTransformer) NeedsSchema() bool            { return false }
-func (t *RedisToMongoDBTransformer) SetSchema(_ *provider.Schema) {}
+func (t *RedisToMongoDBTransformer) NeedsSchema() bool               { return false }
+func (t *RedisToMongoDBTransformer) SetSchema(_ *provider.Schema)    {}
+func (t *RedisToMongoDBTransformer) Configure(cfg TransformerConfig) { t.cfg = cfg }

@@ -2,10 +2,8 @@ package transform
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
-	"github.com/bytedance/sonic"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
@@ -33,99 +31,53 @@ func init() {
 }
 
 type mariadbPassthroughTransformer struct {
-	src string
-	dst string
+	src   string
+	dst   string
+	cfg   TransformerConfig
+	schema *provider.Schema
 }
 
-func (t *mariadbPassthroughTransformer) Transform(_ context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
+func (t *mariadbPassthroughTransformer) Transform(ctx context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
+	// Apply null handling and field mappings for all paths.
+	pipe := NewStagePipeline(
+		NullHandlingStage(&t.cfg),
+		FieldMappingStage(&t.cfg),
+	)
+
+	var err error
+	units, err = pipe.Transform(ctx, units)
+	if err != nil {
+		return nil, err
+	}
+
+	// For SQL→SQL paths, apply timestamp conversion and schema field adjustments.
+	if IsSQLProvider(t.dst) {
+		stages := BuildSQLToSQLStages(t.src, t.dst, t.schema)
+		for _, stage := range stages {
+			units, err = stage(units)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return units, nil
+	}
+
 	switch t.dst {
 	case "redis":
-		return mariadbToNoSQL(units, "redis")
+		return SQLToRedis(units, &t.cfg)
 	case "mongodb":
-		return mariadbToNoSQL(units, "mongodb")
+		return SQLToMongoDB(units, &t.cfg)
 	default:
 		return units, nil
 	}
 }
 
-func (t *mariadbPassthroughTransformer) NeedsSchema() bool            { return false }
-func (t *mariadbPassthroughTransformer) SetSchema(_ *provider.Schema) {}
+func (t *mariadbPassthroughTransformer) NeedsSchema() bool { return true }
+func (t *mariadbPassthroughTransformer) SetSchema(s *provider.Schema) { t.schema = s }
 func (t *mariadbPassthroughTransformer) TypeMapper() provider.TypeMapper {
 	return mariadbTypeMapper{src: t.src, dst: t.dst}
 }
-
-func mariadbToNoSQL(units []provider.MigrationUnit, targetType string) ([]provider.MigrationUnit, error) {
-	result := make([]provider.MigrationUnit, 0, len(units))
-	for _, unit := range units {
-		var envelope map[string]any
-		if err := sonic.Unmarshal(unit.Data, &envelope); err != nil {
-			continue
-		}
-
-		data, _ := envelope["data"].(map[string]any)
-		table, _ := envelope["table"].(string)
-		if data == nil {
-			continue
-		}
-
-		if targetType == "redis" {
-			fields := make(map[string]any)
-			for k, v := range data {
-				switch val := v.(type) {
-				case map[string]any, []any:
-					b, _ := sonic.Marshal(val)
-					fields[k] = string(b)
-				default:
-					fields[k] = v
-				}
-			}
-			redisEnvelope := map[string]any{
-				"type":        "hash",
-				"value":       fields,
-				"ttl_seconds": 0,
-			}
-			encoded, err := sonic.Marshal(redisEnvelope)
-			if err != nil {
-				continue
-			}
-			result = append(result, provider.MigrationUnit{
-				Key: unit.Key, Table: unit.Table,
-				DataType: provider.DataTypeHash,
-				Data:     encoded, Size: int64(len(encoded)),
-			})
-		} else {
-			pk, _ := envelope["primary_key"].(map[string]any)
-			docID := "unknown"
-			if len(pk) > 0 {
-				for _, v := range pk {
-					docID = strings.ReplaceAll(strings.ReplaceAll(
-						strings.ReplaceAll(fmt.Sprintf("%v", v), " ", "_"), ":", "_"), ".", "_")
-					break
-				}
-			}
-			doc := make(map[string]any, len(data))
-			for k, v := range data {
-				doc[k] = v
-			}
-			doc["_id"] = unit.Key
-			mongoEnvelope := map[string]any{
-				"collection":  table,
-				"document_id": docID,
-				"document":    doc,
-			}
-			encoded, err := sonic.Marshal(mongoEnvelope)
-			if err != nil {
-				continue
-			}
-			result = append(result, provider.MigrationUnit{
-				Key: unit.Key, Table: table,
-				DataType: provider.DataTypeDocument,
-				Data:     encoded, Size: int64(len(encoded)),
-			})
-		}
-	}
-	return result, nil
-}
+func (t *mariadbPassthroughTransformer) Configure(cfg TransformerConfig) { t.cfg = cfg }
 
 type mariadbTypeMapper struct {
 	src string
@@ -139,6 +91,15 @@ func (m mariadbTypeMapper) MapType(colType string) (string, bool) {
 		return mariadbToPostgresType(upper)
 	case "sqlite":
 		return mariadbToSQLiteType(upper)
+	case "mariadb":
+		// Map incoming types to MariaDB-compatible types.
+		switch m.src {
+		case "postgres", "cockroachdb":
+			return postgresToMariaDBType(upper)
+		default:
+			// MySQL types are already MariaDB-compatible.
+			return "", false
+		}
 	case "redis", "mongodb":
 		return "", false
 	default:
@@ -215,4 +176,54 @@ func mariadbToSQLiteType(upper string) (string, bool) {
 		return "TEXT", true
 	}
 	return "TEXT", true
+}
+
+// postgresToMariaDBType maps PostgreSQL types to MariaDB-compatible types.
+// MariaDB uses the same DDL type syntax as MySQL for these purposes.
+func postgresToMariaDBType(upper string) (string, bool) {
+	switch {
+	case strings.HasPrefix(upper, "TIMESTAMP WITH TIME ZONE"):
+		return "DATETIME", true
+	case strings.HasPrefix(upper, "TIMESTAMP WITHOUT TIME ZONE"):
+		return "DATETIME", true
+	case strings.HasPrefix(upper, "TIMESTAMP"):
+		return "DATETIME", true
+	case strings.HasPrefix(upper, "CHARACTER VARYING"):
+		return "VARCHAR(255)", true
+	case strings.HasPrefix(upper, "CHARACTER"):
+		return "CHAR(255)", true
+	case strings.HasPrefix(upper, "DOUBLE PRECISION"):
+		return "DOUBLE", true
+	case strings.HasPrefix(upper, "NUMERIC"):
+		return "DECIMAL", true
+	}
+
+	typeMap := map[string]string{
+		"SMALLINT":    "SMALLINT",
+		"INTEGER":     "INT",
+		"BIGINT":      "BIGINT",
+		"REAL":        "FLOAT",
+		"NUMERIC":     "DECIMAL",
+		"DECIMAL":     "DECIMAL",
+		"CHAR":        "CHAR",
+		"VARCHAR":     "VARCHAR",
+		"TEXT":        "TEXT",
+		"BYTEA":       "BLOB",
+		"DATE":        "DATE",
+		"TIME":        "TIME",
+		"BOOLEAN":     "TINYINT(1)",
+		"BOOL":        "TINYINT(1)",
+		"JSON":        "JSON",
+		"JSONB":       "JSON",
+		"UUID":        "CHAR(36)",
+		"SERIAL":      "INT AUTO_INCREMENT",
+		"BIGSERIAL":   "BIGINT AUTO_INCREMENT",
+		"TIMESTAMPTZ": "DATETIME",
+	}
+
+	if mapped, ok := typeMap[upper]; ok {
+		return mapped, true
+	}
+
+	return "", false
 }
