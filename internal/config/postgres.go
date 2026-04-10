@@ -22,7 +22,7 @@ func DefaultPostgresConfig() PostgresConfig {
 		Host:     "127.0.0.1",
 		Port:     5432,
 		Username: "postgres",
-		SSLMode:  "prefer",
+		SSLMode:  "require",
 	}
 }
 

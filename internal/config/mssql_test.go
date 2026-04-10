@@ -95,8 +95,8 @@ func TestDefaultMSSQLConfig(t *testing.T) {
 	if cfg.Username != "sa" {
 		t.Errorf("default username = %q", cfg.Username)
 	}
-	if cfg.Encrypt {
-		t.Error("default encrypt should be false")
+	if !cfg.Encrypt {
+		t.Error("default encrypt should be true")
 	}
 }
 

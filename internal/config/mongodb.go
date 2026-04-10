@@ -14,6 +14,7 @@ type MongoDBConfig struct {
 	Password   string `yaml:"password" json:"password"`
 	Database   string `yaml:"database" json:"database"`
 	AuthSource string `yaml:"auth_source" json:"auth_source"`
+	TLS        bool   `yaml:"tls" json:"tls"`
 }
 
 // DefaultMongoDBConfig returns a MongoDBConfig with sensible defaults.
@@ -71,6 +72,9 @@ func ParseMongoDBURL(rawURL string) (MongoDBConfig, error) {
 	// Query params
 	if authSrc := u.Query().Get("authSource"); authSrc != "" {
 		cfg.AuthSource = authSrc
+	}
+	if tlsVal := u.Query().Get("tls"); tlsVal == "true" || tlsVal == "1" {
+		cfg.TLS = true
 	}
 
 	return cfg, nil

@@ -83,8 +83,15 @@ func TestMariaDBConfig_Validate(t *testing.T) {
 
 func TestMariaDBConfig_DSN(t *testing.T) {
 	cfg := MariaDBConfig{Host: "db", Port: 3306, Username: "u", Password: "p", Database: "d"}
-	if got := cfg.DSN(); got != "u:p@tcp(db:3306)/d" {
+	if got := cfg.DSN(); got != "u:***@tcp(db:3306)/d" {
 		t.Errorf("DSN() = %q", got)
+	}
+}
+
+func TestMariaDBConfig_DSNWithPassword(t *testing.T) {
+	cfg := MariaDBConfig{Host: "db", Port: 3306, Username: "u", Password: "p", Database: "d"}
+	if got := cfg.DSNWithPassword(); got != "u:p@tcp(db:3306)/d" {
+		t.Errorf("DSNWithPassword() = %q", got)
 	}
 }
 

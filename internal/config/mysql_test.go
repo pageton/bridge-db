@@ -116,7 +116,7 @@ func TestMySQLConfig_Address_UnixSocket(t *testing.T) {
 func TestMySQLConfig_DSN_TCP(t *testing.T) {
 	cfg := MySQLConfig{Host: "db", Port: 3306, Username: "u", Password: "p", Database: "d"}
 	dsn := cfg.DSN()
-	if dsn != "u:p@tcp(db:3306)/d" {
+	if dsn != "u:***@tcp(db:3306)/d" {
 		t.Errorf("DSN() = %q", dsn)
 	}
 }
@@ -124,8 +124,16 @@ func TestMySQLConfig_DSN_TCP(t *testing.T) {
 func TestMySQLConfig_DSN_UnixSocket(t *testing.T) {
 	cfg := MySQLConfig{Host: "/sock", Port: 0, Username: "u", Password: "p", Database: "d"}
 	dsn := cfg.DSN()
-	if dsn != "u:p@unix(/sock)/d" {
+	if dsn != "u:***@unix(/sock)/d" {
 		t.Errorf("DSN() = %q", dsn)
+	}
+}
+
+func TestMySQLConfig_DSNWithPassword(t *testing.T) {
+	cfg := MySQLConfig{Host: "db", Port: 3306, Username: "u", Password: "p", Database: "d"}
+	dsn := cfg.DSNWithPassword()
+	if dsn != "u:p@tcp(db:3306)/d" {
+		t.Errorf("DSNWithPassword() = %q", dsn)
 	}
 }
 

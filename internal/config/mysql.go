@@ -37,8 +37,18 @@ func (c MySQLConfig) IsUnixSocket() bool {
 	return c.Port == 0 && len(c.Host) > 0
 }
 
-// DSN returns a MySQL driver-compatible data source name.
+// DSN returns a MySQL driver-compatible data source name with masked password.
 func (c MySQLConfig) DSN() string {
+	if c.IsUnixSocket() {
+		return fmt.Sprintf("%s:***@unix(%s)/%s",
+			c.Username, c.Host, c.Database)
+	}
+	return fmt.Sprintf("%s:***@tcp(%s:%d)/%s",
+		c.Username, c.Host, c.Port, c.Database)
+}
+
+// DSNWithPassword returns the real MySQL DSN for driver use only.
+func (c MySQLConfig) DSNWithPassword() string {
 	if c.IsUnixSocket() {
 		return fmt.Sprintf("%s:%s@unix(%s)/%s",
 			c.Username, c.Password, c.Host, c.Database)

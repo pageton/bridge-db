@@ -15,7 +15,7 @@ import (
 // File loading
 // ---------------------------------------------------------------------------
 
-const maxConfigSize = 10 << 20 // 10 MB
+const maxConfigSize = 1 << 20 // 1 MB
 
 // LoadFromFile reads a YAML configuration file and returns a fully
 // defaulted, validated, and resolved MigrationConfig.

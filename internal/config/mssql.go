@@ -22,7 +22,7 @@ func DefaultMSSQLConfig() MSSQLConfig {
 		Host:      "127.0.0.1",
 		Port:      1433,
 		Username:  "sa",
-		Encrypt:   false,
+		Encrypt:   true,
 		TrustCert: false,
 	}
 }
@@ -31,7 +31,25 @@ func (c MSSQLConfig) Address() string {
 	return fmt.Sprintf("%s:%d", c.Host, c.Port)
 }
 
+// DSN returns a masked MSSQL connection string (password replaced with ***).
 func (c MSSQLConfig) DSN() string {
+	dsn := fmt.Sprintf("sqlserver://%s@%s:%d",
+		url.UserPassword(c.Username, "***").String(),
+		c.Host, c.Port)
+	if c.Database != "" {
+		dsn += "?database=" + url.QueryEscape(c.Database)
+	}
+	if c.Encrypt {
+		dsn += "&encrypt=true"
+	}
+	if c.TrustCert {
+		dsn += "&TrustServerCertificate=true"
+	}
+	return dsn
+}
+
+// DSNWithPassword returns the real MSSQL connection string for driver use only.
+func (c MSSQLConfig) DSNWithPassword() string {
 	dsn := fmt.Sprintf("sqlserver://%s@%s:%d",
 		url.UserPassword(c.Username, c.Password).String(),
 		c.Host, c.Port)

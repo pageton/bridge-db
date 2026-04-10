@@ -19,6 +19,7 @@ type MigrationConfig struct {
 	Source      ConnectionConfig `yaml:"source" json:"source"`
 	Destination ConnectionConfig `yaml:"destination" json:"destination"`
 	Pipeline    PipelineConfig   `yaml:"pipeline" json:"pipeline"`
+	Transform   TransformConfig  `yaml:"transform" json:"transform"`
 	Checkpoint  CheckpointConfig `yaml:"checkpoint" json:"checkpoint"`
 	Logging     LoggingConfig    `yaml:"logging" json:"logging"`
 }
@@ -309,6 +310,9 @@ func mergeMongoDB(base, override MongoDBConfig) MongoDBConfig {
 	if override.AuthSource != "" {
 		base.AuthSource = override.AuthSource
 	}
+	if override.TLS {
+		base.TLS = true
+	}
 	return base
 }
 
@@ -515,6 +519,72 @@ func DefaultLoggingConfig() LoggingConfig {
 		Level: "info",
 		JSON:  false,
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Transform configuration
+// ---------------------------------------------------------------------------
+
+// TransformConfig controls how data is transformed during migration.
+// All fields are optional. When unset, sensible defaults apply.
+type TransformConfig struct {
+	// NullPolicy controls null value handling during transformation.
+	// Valid values: "passthrough" (default), "drop", "replace", "error".
+	NullPolicy string `yaml:"null_policy" json:"null_policy"`
+
+	// Mappings is a list of field mapping rules, keyed by table name.
+	// The key "*" applies to all tables (wildcard).
+	Mappings map[string][]FieldMapping `yaml:"mappings" json:"mappings"`
+}
+
+// DefaultTransformConfig returns a TransformConfig with sensible defaults.
+func DefaultTransformConfig() TransformConfig {
+	return TransformConfig{
+		NullPolicy: "passthrough",
+	}
+}
+
+// FieldMapping describes a single field transformation rule.
+type FieldMapping struct {
+	// Source is the source field/column name. Required.
+	Source string `yaml:"source" json:"source"`
+
+	// Destination is the target field name. If empty, defaults to Source.
+	Destination string `yaml:"destination" json:"destination"`
+
+	// Action controls what happens to the field.
+	// "rename"  -- rename Source to Destination (default if Destination is set)
+	// "drop"    -- exclude this field from output
+	// "convert" -- apply type coercion using Convert field
+	Action string `yaml:"action" json:"action"`
+
+	// Convert specifies a type conversion for "convert" action.
+	// Examples: "string", "int", "float", "bool", "timestamp:mysql:postgres"
+	Convert string `yaml:"convert" json:"convert"`
+}
+
+// Validate checks the transform config for errors.
+func (c TransformConfig) Validate() error {
+	switch c.NullPolicy {
+	case "", "passthrough", "drop", "replace", "error":
+		// valid
+	default:
+		return fmt.Errorf("invalid null_policy %q (must be passthrough, drop, replace, or error)", c.NullPolicy)
+	}
+	for table, mappings := range c.Mappings {
+		for i, m := range mappings {
+			if m.Source == "" {
+				return fmt.Errorf("transform: mappings.%s[%d]: source is required", table, i)
+			}
+			switch m.Action {
+			case "", "rename", "drop", "convert":
+				// valid
+			default:
+				return fmt.Errorf("transform: mappings.%s[%d]: invalid action %q", table, i, m.Action)
+			}
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

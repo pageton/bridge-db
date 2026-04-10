@@ -35,6 +35,15 @@ func (c MariaDBConfig) IsUnixSocket() bool {
 
 func (c MariaDBConfig) DSN() string {
 	if c.IsUnixSocket() {
+		return fmt.Sprintf("%s:***@unix(%s)/%s",
+			c.Username, c.Host, c.Database)
+	}
+	return fmt.Sprintf("%s:***@tcp(%s:%d)/%s",
+		c.Username, c.Host, c.Port, c.Database)
+}
+
+func (c MariaDBConfig) DSNWithPassword() string {
+	if c.IsUnixSocket() {
 		return fmt.Sprintf("%s:%s@unix(%s)/%s",
 			c.Username, c.Password, c.Host, c.Database)
 	}
@@ -42,8 +51,10 @@ func (c MariaDBConfig) DSN() string {
 		c.Username, c.Password, c.Host, c.Port, c.Database)
 }
 
-var mariadbTCP = regexp.MustCompile(`tcp\(([^:]+):(\d+)\)`)
-var mariadbUnix = regexp.MustCompile(`unix\((.+)\)`)
+var (
+	mariadbTCP  = regexp.MustCompile(`tcp\(([^:]+):(\d+)\)`)
+	mariadbUnix = regexp.MustCompile(`unix\((.+)\)`)
+)
 
 func ParseMariaDBURL(rawURL string) (MariaDBConfig, error) {
 	u, err := url.Parse(rawURL)

@@ -20,7 +20,7 @@ func DefaultCockroachDBConfig() CockroachDBConfig {
 		Host:     "127.0.0.1",
 		Port:     26257,
 		Username: "root",
-		SSLMode:  "prefer",
+		SSLMode:  "require",
 	}
 }
 
