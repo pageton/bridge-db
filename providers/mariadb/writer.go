@@ -3,12 +3,10 @@ package mariadb
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pageton/bridge-db/internal/logger"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
@@ -162,23 +160,26 @@ func (w *mariaDBWriter) estimateChunkSize(rows []mariaDBRow, columns []string, r
 	}
 	overhead := len(queryPrefix) + len(querySuffix)
 	sampleSize := min(10, len(rows))
-	var avgRowDataSize int
+	maxRowDataSize := 64
 	for i := 0; i < sampleSize; i++ {
+		var rowSize int
 		for _, col := range columns {
 			if v, ok := rows[i].Data[col]; ok {
 				switch val := v.(type) {
 				case string:
-					avgRowDataSize += len(val)
+					rowSize += len(val)
 				case []byte:
-					avgRowDataSize += len(val)
+					rowSize += len(val)
 				default:
-					avgRowDataSize += 64
+					rowSize += 64
 				}
 			}
 		}
+		if rowSize > maxRowDataSize {
+			maxRowDataSize = rowSize
+		}
 	}
-	avgRowDataSize /= sampleSize
-	perRow := len(rowPlaceholder) + 1 + int(float64(avgRowDataSize)*1.2)
+	perRow := len(rowPlaceholder) + 1 + int(float64(maxRowDataSize)*1.2)
 	available := maxPacketSize - overhead
 	if available <= 0 {
 		return 1
@@ -276,18 +277,6 @@ func (w *mariaDBWriter) prepareValue(col string, row mariaDBRow) any {
 	val := row.Data[col]
 	if val == nil {
 		return nil
-	}
-	switch x := val.(type) {
-	case pgtype.Numeric:
-		if x.Valid {
-			b, err := x.MarshalJSON()
-			if err == nil {
-				return string(b)
-			}
-		}
-		return nil
-	case json.Number:
-		return x.String()
 	}
 	colType := strings.ToLower(row.ColumnTypes[col])
 	if !dateTimeTypes[colType] {

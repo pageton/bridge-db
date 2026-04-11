@@ -3,12 +3,10 @@ package mysql
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pageton/bridge-db/internal/logger"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
@@ -216,27 +214,32 @@ func (w *mysqlWriter) estimateChunkSize(rows []mysqlRow, columns []string, rowPl
 	// Base overhead: query prefix + suffix + separators.
 	overhead := len(queryPrefix) + len(querySuffix)
 
-	// Estimate average row data size from first few rows.
+	// Estimate max row data size from first few rows. Using max instead
+	// of average avoids underestimating when small rows appear before
+	// large BLOBs, which could cause chunks to exceed max_allowed_packet.
 	sampleSize := min(10, len(rows))
-	var avgRowDataSize int
+	maxRowDataSize := 64 // minimum baseline for non-string types
 	for i := 0; i < sampleSize; i++ {
+		var rowSize int
 		for _, col := range columns {
 			if v, ok := rows[i].Data[col]; ok {
 				switch val := v.(type) {
 				case string:
-					avgRowDataSize += len(val)
+					rowSize += len(val)
 				case []byte:
-					avgRowDataSize += len(val)
+					rowSize += len(val)
 				default:
-					avgRowDataSize += 64 // estimate for non-string types
+					rowSize += 64
 				}
 			}
 		}
+		if rowSize > maxRowDataSize {
+			maxRowDataSize = rowSize
+		}
 	}
-	avgRowDataSize /= sampleSize
 
 	// Per-row overhead: placeholder string + comma separator + escaped data overhead.
-	perRow := len(rowPlaceholder) + 1 + int(float64(avgRowDataSize)*1.2) // 20% escape overhead
+	perRow := len(rowPlaceholder) + 1 + int(float64(maxRowDataSize)*1.2) // 20% escape overhead
 
 	available := maxPacketSize - overhead
 	if available <= 0 {
@@ -362,19 +365,6 @@ func (w *mysqlWriter) prepareValue(col string, row mysqlRow) any {
 	val := row.Data[col]
 	if val == nil {
 		return nil
-	}
-
-	switch x := val.(type) {
-	case pgtype.Numeric:
-		if x.Valid {
-			b, err := x.MarshalJSON()
-			if err == nil {
-				return string(b)
-			}
-		}
-		return nil
-	case json.Number:
-		return x.String()
 	}
 
 	colType := strings.ToLower(row.ColumnTypes[col])
