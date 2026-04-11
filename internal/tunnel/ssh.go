@@ -399,6 +399,8 @@ func (t *SSHTunnel) keepalive() {
 }
 
 // reconnect attempts to re-establish the SSH connection and listener.
+// It tries to rebind the same local port so that existing database driver
+// connections (which are wired to the old local address) remain valid.
 // Returns true on success. The tunnel remains closed on failure.
 func (t *SSHTunnel) reconnect() bool {
 	log := logger.L().With("component", "tunnel", "ssh_host", t.config.Host)
@@ -427,10 +429,11 @@ func (t *SSHTunnel) reconnect() bool {
 
 	newClient := ssh.NewClient(sshConn, chans, reqs)
 
-	// Close old resources
+	// Snapshot the old local address and resources under lock.
 	t.mu.Lock()
 	oldListener := t.listener
 	oldClient := t.client
+	previousAddr := t.localAddr
 	t.client = newClient
 	t.mu.Unlock()
 
@@ -445,9 +448,9 @@ func (t *SSHTunnel) reconnect() bool {
 		_ = oldClient.Close()
 	}
 
-	// Start new listener on same port or random
-	newListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
+	// Try to rebind the same local port so existing DB connections survive.
+	newListener, newAddr := t.listenReuse(previousAddr)
+	if newListener == nil {
 		log.Error("tunnel: reconnect failed (listen)", "error", err)
 		t.mu.Lock()
 		t.open = false
@@ -457,7 +460,7 @@ func (t *SSHTunnel) reconnect() bool {
 
 	t.mu.Lock()
 	t.listener = newListener
-	t.localAddr = newListener.Addr().String()
+	t.localAddr = newAddr
 	t.mu.Unlock()
 
 	// Restart forwarding goroutine
@@ -468,4 +471,21 @@ func (t *SSHTunnel) reconnect() bool {
 
 	log.Debug("tunnel: reconnected successfully", "local_addr", t.localAddr)
 	return true
+}
+
+// listenReuse tries to bind the previous local address so existing DB
+// connections remain valid. Falls back to a random port if the old address
+// is no longer available.
+func (t *SSHTunnel) listenReuse(previousAddr string) (net.Listener, string) {
+	if previousAddr != "" {
+		if ln, err := net.Listen("tcp", previousAddr); err == nil {
+			return ln, previousAddr
+		}
+		// Old port taken (unlikely but possible); fall through to random.
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, ""
+	}
+	return ln, ln.Addr().String()
 }
