@@ -8,11 +8,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/pageton/bridge-db/internal/app"
 	"github.com/pageton/bridge-db/internal/config"
 	"github.com/pageton/bridge-db/internal/logger"
-	"github.com/pageton/bridge-db/internal/tunnel"
 	verifypkg "github.com/pageton/bridge-db/internal/verify"
-	"github.com/pageton/bridge-db/pkg/provider"
 )
 
 var (
@@ -114,69 +113,7 @@ func runVerify(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("config resolution failed: %w", err)
 	}
 
-	log := logger.L().With("component", "verify")
-
-	// Open SSH tunnels if configured
-	tunnelPool := tunnel.NewPool()
-	if cfg.Source.SSH != nil && cfg.Source.SSH.Enabled {
-		if err := tunnelPool.OpenAll(ctx, map[string]tunnel.Config{
-			"source": *cfg.Source.SSH,
-		}); err != nil {
-			return fmt.Errorf("source tunnel: %w", err)
-		}
-		defer func() { _ = tunnelPool.CloseAll() }()
-	}
-	if cfg.Destination.SSH != nil && cfg.Destination.SSH.Enabled {
-		if err := tunnelPool.OpenAll(ctx, map[string]tunnel.Config{
-			"destination": *cfg.Destination.SSH,
-		}); err != nil {
-			return fmt.Errorf("dest tunnel: %w", err)
-		}
-		defer func() { _ = tunnelPool.CloseAll() }()
-	}
-
-	// Create and connect source provider
-	srcProvider, err := provider.New(cfg.Source.Provider)
-	if err != nil {
-		return fmt.Errorf("source provider: %w", err)
-	}
-
-	dstProvider, err := provider.New(cfg.Destination.Provider)
-	if err != nil {
-		return fmt.Errorf("dest provider: %w", err)
-	}
-
-	// Connect source
-	srcAddr := tunnelPool.ResolvedAddr("source")
-	srcCfg, err := resolveCliProviderConfig(&cfg.Source, srcAddr)
-	if err != nil {
-		return fmt.Errorf("source tunnel config: %w", err)
-	}
-	if err := srcProvider.Connect(ctx, srcCfg, nil); err != nil {
-		return fmt.Errorf("source connect: %w", err)
-	}
-	defer func() { _ = srcProvider.Close() }()
-
-	// Connect destination
-	dstAddr := tunnelPool.ResolvedAddr("destination")
-	dstCfg, err := resolveCliProviderConfig(&cfg.Destination, dstAddr)
-	if err != nil {
-		return fmt.Errorf("dest tunnel config: %w", err)
-	}
-	if err := dstProvider.Connect(ctx, nil, dstCfg); err != nil {
-		return fmt.Errorf("dest connect: %w", err)
-	}
-	defer func() { _ = dstProvider.Close() }()
-
-	// Ping both
-	if err := srcProvider.Ping(ctx); err != nil {
-		return fmt.Errorf("source ping: %w", err)
-	}
-	if err := dstProvider.Ping(ctx); err != nil {
-		return fmt.Errorf("dest ping: %w", err)
-	}
-
-	log.Debug("connected to both databases")
+	logger.L().With("component", "verify").Debug("verification configuration resolved")
 
 	// Build verification options
 	opts := verifypkg.DefaultOptions()
@@ -190,9 +127,7 @@ func runVerify(cmd *cobra.Command, args []string) error {
 		opts.ChecksumComparison = !verifyNoChecksum
 	}
 
-	// Run verification
-	cv := verifypkg.NewCrossVerifier(srcProvider, dstProvider, opts)
-	report, err := cv.Verify(ctx)
+	report, err := (app.VerificationService{}).VerifyMigration(ctx, cfg, opts)
 	if err != nil {
 		return fmt.Errorf("verification failed: %w", err)
 	}

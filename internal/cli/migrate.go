@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/pageton/bridge-db/internal/app"
 	"github.com/pageton/bridge-db/internal/bridge"
 	"github.com/pageton/bridge-db/internal/config"
 	"github.com/pageton/bridge-db/internal/logger"
@@ -261,14 +262,6 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("config resolution failed: %w", err)
 	}
 
-	// Print dry-run preview and exit without connecting.
-	if dryRun {
-		printDryRunPreview(cfg)
-		return nil
-	}
-
-	reporter := progress.NewConsoleReporter()
-
 	opts := bridge.DefaultPipelineOptions()
 	opts.BatchSize = batchSize
 	opts.DryRun = dryRun
@@ -297,14 +290,21 @@ func runMigrate(cmd *cobra.Command, args []string) error {
 		Seed:               42,
 	}
 
-	pipeline, err := bridge.NewPipeline(cfg, opts, reporter, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create migration pipeline: %w", err)
+	// Print dry-run preview and exit without connecting.
+	if dryRun {
+		plan, err := (app.PlanningService{}).PlanMigration(ctx, cfg, opts)
+		if err != nil {
+			return fmt.Errorf("dry-run planning failed: %w", err)
+		}
+		printDryRunPreview(cfg, plan)
+		return nil
 	}
 
 	printStartupContext(cfg, opts)
 
-	result, err := pipeline.Run(ctx)
+	svc := app.NewMigrationService(app.NewRunStatusService())
+	reporter := progress.NewConsoleReporter()
+	result, _, err := svc.RunSync(ctx, cfg, opts, reporter)
 	if err != nil {
 		return fmt.Errorf("migration failed: %w", err)
 	}
@@ -590,7 +590,7 @@ func preflightValidate(cfg *config.MigrationConfig) error {
 }
 
 // printDryRunPreview shows a migration plan without executing it.
-func printDryRunPreview(cfg *config.MigrationConfig) {
+func printDryRunPreview(cfg *config.MigrationConfig, plan *bridge.MigrationPlan) {
 	fmt.Println()
 	fmt.Println("=== Dry Run Preview ===")
 	fmt.Printf("Source:      %s", cfg.Source.Provider)
@@ -607,7 +607,7 @@ func printDryRunPreview(cfg *config.MigrationConfig) {
 	}
 	fmt.Println()
 
-	if cfg.IsCrossDB() {
+	if plan != nil && plan.CrossDB {
 		fmt.Println("Mode:        Cross-engine migration")
 		fmt.Println("             Data will be transformed between database formats")
 	} else {
@@ -640,6 +640,40 @@ func printDryRunPreview(cfg *config.MigrationConfig) {
 		fmt.Printf("  Effective verify: %s\n", effectiveVerify)
 		if migrateSchema && !schemaOK {
 			fmt.Printf("  Schema migration: skipped (one or both providers lack schema support)\n")
+		}
+	}
+
+	if plan != nil {
+		fmt.Println()
+		fmt.Println("Plan:")
+		fmt.Printf("  Transformer:     %s\n", plan.TransformerType)
+		fmt.Printf("  Estimated rows:  %d\n", plan.EstimatedRows)
+		fmt.Printf("  Estimated batch: %d\n", plan.EstimatedBatches)
+		fmt.Printf("  Verification:    %s\n", plan.Verification)
+		if len(plan.Tables) > 0 {
+			fmt.Println()
+			fmt.Println("Entities:")
+			for _, table := range plan.Tables {
+				if table.EstimatedRows >= 0 {
+					fmt.Printf("  - %s (%d rows)\n", table.Name, table.EstimatedRows)
+				} else {
+					fmt.Printf("  - %s\n", table.Name)
+				}
+			}
+		}
+		if len(plan.UnsupportedFields) > 0 {
+			fmt.Println()
+			fmt.Println("Unsupported or lossy fields:")
+			for _, field := range plan.UnsupportedFields {
+				fmt.Printf("  - %s.%s: %s\n", field.Table, field.Field, field.Reason)
+			}
+		}
+		if len(plan.Warnings) > 0 {
+			fmt.Println()
+			fmt.Println("Warnings:")
+			for _, warning := range plan.Warnings {
+				fmt.Printf("  - %s\n", warning)
+			}
 		}
 	}
 
