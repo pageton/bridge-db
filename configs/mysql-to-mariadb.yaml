@@ -1,0 +1,30 @@
+# MySQL to MariaDB Migration
+
+# Migrate a MySQL database to MariaDB.
+# Same engine family with high compatibility.
+
+source:
+  provider: mysql
+  url: "mysql://USER:PASSWORD@tcp(localhost:3306)/myapp"
+
+destination:
+  provider: mariadb
+  url: "mariadb://USER:PASSWORD@localhost:3306/myapp"
+
+pipeline:
+  batch_size: 1000
+  dry_run: false
+  verify: true
+  conflict_strategy: overwrite
+  migrate_schema: true
+  fk_handling: defer_constraints
+  max_retries: 3
+  retry_backoff: 500ms
+
+checkpoint:
+  enabled: true
+  path: ".bridge-checkpoint-mysql-maria.json"
+
+logging:
+  level: info
+  json: false

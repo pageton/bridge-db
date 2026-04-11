@@ -1,0 +1,40 @@
+# MongoDB to PostgreSQL Migration
+
+# Migrate a MongoDB database to PostgreSQL.
+# NoSQL documents are flattened into relational tables with type conversion.
+# Nested fields and arrays may require manual review.
+
+source:
+  provider: mongodb
+  url: "mongodb://USER:PASSWORD@localhost:27017/myapp"
+
+  # Or use individual overrides:
+  # mongodb:
+  #   host: "localhost"
+  #   port: 27017
+  #   username: "admin"
+  #   password: "PASSWORD"
+  #   database: "myapp"
+  #   auth_source: "admin"
+
+destination:
+  provider: postgres
+  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=require"
+
+pipeline:
+  batch_size: 500
+  dry_run: false
+  verify: true
+  conflict_strategy: overwrite
+  migrate_schema: true
+  fk_handling: ordered
+  max_retries: 3
+  retry_backoff: 500ms
+
+checkpoint:
+  enabled: true
+  path: ".bridge-checkpoint-mongo-pg.json"
+
+logging:
+  level: info
+  json: false

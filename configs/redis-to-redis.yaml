@@ -1,0 +1,37 @@
+# Redis to Redis Migration
+
+# Clone a Redis database to another Redis instance.
+# Supports all data types: strings, hashes, lists, sets, sorted sets, streams.
+
+source:
+  provider: redis
+  url: "redis://:PASSWORD@source-host:6379/0"
+
+  # Or use individual overrides:
+  # redis:
+  #   host: "source-host"
+  #   port: 6379
+  #   password: "PASSWORD"
+  #   db: 0
+
+destination:
+  provider: redis
+  url: "redis://:PASSWORD@dest-host:6379/0"
+
+pipeline:
+  batch_size: 1000
+  dry_run: false
+  verify: true
+  conflict_strategy: overwrite
+  migrate_schema: false
+  fk_handling: skip
+  max_retries: 3
+  retry_backoff: 500ms
+
+checkpoint:
+  enabled: true
+  path: ".bridge-checkpoint-redis-redis.json"
+
+logging:
+  level: info
+  json: false

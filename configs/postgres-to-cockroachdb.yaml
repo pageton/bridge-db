@@ -1,0 +1,30 @@
+# PostgreSQL to CockroachDB Migration
+
+# Migrate a PostgreSQL database to CockroachDB.
+# CockroachDB is wire-compatible with PostgreSQL, making this a high-fidelity migration.
+
+source:
+  provider: postgres
+  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=require"
+
+destination:
+  provider: cockroachdb
+  url: "cockroachdb://USER:PASSWORD@localhost:26257/myapp?sslmode=prefer"
+
+pipeline:
+  batch_size: 1000
+  dry_run: false
+  verify: true
+  conflict_strategy: overwrite
+  migrate_schema: true
+  fk_handling: defer_constraints
+  max_retries: 3
+  retry_backoff: 500ms
+
+checkpoint:
+  enabled: true
+  path: ".bridge-checkpoint-pg-crdb.json"
+
+logging:
+  level: info
+  json: false

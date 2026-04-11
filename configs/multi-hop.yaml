@@ -1,11 +1,20 @@
 # Multi-Hop Migration Example
-# =============================
+
 # This file demonstrates a multi-step migration pipeline.
 # Run each step sequentially using separate config files or commands.
 #
-# Step 1: MSSQL → PostgreSQL   (see mssql-to-postgres.yaml)
-# Step 2: CockroachDB → MariaDB (see cockroachdb-to-mariadb.yaml)
-# Step 3: SQLite → MySQL        (see sqlite-to-mysql.yaml)
+# Available config templates:
+#   cockroachdb-to-mariadb.yaml   — CockroachDB to MariaDB
+#   mongodb-to-postgres.yaml      — MongoDB to PostgreSQL
+#   mssql-to-postgres.yaml        — MSSQL to PostgreSQL
+#   mysql-to-mariadb.yaml         — MySQL to MariaDB
+#   mysql-to-postgres.yaml        — MySQL to PostgreSQL
+#   postgres-to-cockroachdb.yaml  — PostgreSQL to CockroachDB
+#   postgres-to-mysql.yaml        — PostgreSQL to MySQL
+#   postgres-to-postgres.yaml     — PostgreSQL to PostgreSQL (clone)
+#   redis-to-redis.yaml           — Redis to Redis (clone)
+#   sqlite-to-mysql.yaml          — SQLite to MySQL
+#   sqlite-to-postgres.yaml       — SQLite to PostgreSQL
 #
 # Usage:
 #   bridge migrate -c configs/mssql-to-postgres.yaml

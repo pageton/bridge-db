@@ -1,0 +1,30 @@
+# MySQL to PostgreSQL Migration
+
+# Migrate a MySQL database to PostgreSQL.
+# Supports schema migration, type mapping, and data verification.
+
+source:
+  provider: mysql
+  url: "mysql://USER:PASSWORD@tcp(localhost:3306)/myapp"
+
+destination:
+  provider: postgres
+  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=require"
+
+pipeline:
+  batch_size: 1000
+  dry_run: false
+  verify: true
+  conflict_strategy: overwrite
+  migrate_schema: true
+  fk_handling: defer_constraints
+  max_retries: 3
+  retry_backoff: 500ms
+
+checkpoint:
+  enabled: true
+  path: ".bridge-checkpoint-mysql-pg.json"
+
+logging:
+  level: info
+  json: false

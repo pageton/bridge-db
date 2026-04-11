@@ -1,0 +1,30 @@
+# PostgreSQL to PostgreSQL Migration
+
+# Clone a PostgreSQL database to another PostgreSQL instance.
+# Useful for creating replicas, migrating between environments, or upgrading servers.
+
+source:
+  provider: postgres
+  url: "postgres://USER:PASSWORD@localhost:5432/myapp?sslmode=require"
+
+destination:
+  provider: postgres
+  url: "postgres://USER:PASSWORD@remote-host:5432/myapp?sslmode=require"
+
+pipeline:
+  batch_size: 1000
+  dry_run: false
+  verify: true
+  conflict_strategy: overwrite
+  migrate_schema: true
+  fk_handling: defer_constraints
+  max_retries: 3
+  retry_backoff: 500ms
+
+checkpoint:
+  enabled: true
+  path: ".bridge-checkpoint-pg-pg.json"
+
+logging:
+  level: info
+  json: false

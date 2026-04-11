@@ -13,7 +13,9 @@ coverage.html
 *.jks
 .env
 .env*
+.mcp.json
 .seed-data/
 /bridge
 bridge.test
 *.test
+bridge.old
