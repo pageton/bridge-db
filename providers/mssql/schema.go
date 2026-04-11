@@ -92,7 +92,13 @@ func (m *mssqlSchemaMigrator) Drop(ctx context.Context, schema *provider.Schema)
 }
 
 func (m *mssqlSchemaMigrator) getTableColumns(ctx context.Context, table string) ([]provider.ColumnSchema, error) {
-	query := "SELECT c.[name], t.[name], c.is_nullable, " +
+	query := "SELECT c.[name], " +
+		"CASE WHEN t.[name] IN ('nvarchar','nchar','varchar','char','binary','varbinary') " +
+		"THEN t.[name] + '(' + CASE WHEN c.max_length = -1 THEN 'MAX' ELSE CAST(c.max_length / 2 AS VARCHAR(10)) END + ')' " +
+		"WHEN t.[name] IN ('decimal','numeric') " +
+		"THEN t.[name] + '(' + CAST(c.precision AS VARCHAR(10)) + ',' + CAST(c.scale AS VARCHAR(10)) + ')' " +
+		"ELSE t.[name] END AS col_type, " +
+		"c.is_nullable, " +
 		"OBJECT_DEFINITION(c.default_object_id), " +
 		"COLUMNPROPERTY(c.object_id, c.[name], 'IsIdentity') " +
 		"FROM sys.columns c " +

@@ -105,7 +105,50 @@ func (w *mssqlWriter) writeTable(ctx context.Context, table string, rows []mssql
 	return w.writeWithUpsert(ctx, table, columns, rows, failedKeys, errors)
 }
 
+// hasIdentityColumn checks if a table has an IDENTITY column.
+func (w *mssqlWriter) hasIdentityColumn(ctx context.Context, table string) bool {
+	var count int
+	err := w.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sys.identity_columns WHERE OBJECT_NAME(object_id) = @p1",
+		table,
+	).Scan(&count)
+	if err != nil {
+		w.log.Debug("failed to check identity columns", "table", table, "error", err)
+		return false
+	}
+	return count > 0
+}
+
+// setIdentityInsert wraps fn with SET IDENTITY_INSERT ON/OFF for tables
+// that have identity columns. If the table has no identity column, fn runs
+// unchanged. Uses a transaction to guarantee the SET and fn execute on the
+// same connection (IDENTITY_INSERT is per-connection in MSSQL).
+func (w *mssqlWriter) setIdentityInsert(ctx context.Context, table string, hasIdentity bool, fn func(tx *sql.Tx) error) error {
+	if !hasIdentity {
+		return fn(nil)
+	}
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin identity insert tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	ident := fmt.Sprintf("SET IDENTITY_INSERT %s ON", quoteIdentifier(table))
+	if _, err := tx.ExecContext(ctx, ident); err != nil {
+		return fmt.Errorf("enable identity insert: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	ident = fmt.Sprintf("SET IDENTITY_INSERT %s OFF", quoteIdentifier(table))
+	if _, err := tx.ExecContext(ctx, ident); err != nil {
+		w.log.Debug("failed to disable identity insert", "table", table, "error", err)
+	}
+	return tx.Commit()
+}
+
 func (w *mssqlWriter) writeWithUpsert(ctx context.Context, table string, columns []string, rows []mssqlRow, failedKeys *[]string, errors *[]error) error {
+	hasIdentity := w.hasIdentityColumn(ctx, table)
 	for i := 0; i < len(rows); {
 		chunkSize := w.estimateChunkSize(rows[i:], columns)
 		if chunkSize == 0 {
@@ -117,7 +160,9 @@ func (w *mssqlWriter) writeWithUpsert(ctx context.Context, table string, columns
 		}
 
 		chunk := rows[i:end]
-		if err := w.execChunkedMerge(ctx, table, chunk, columns, failedKeys, errors); err != nil {
+		if err := w.setIdentityInsert(ctx, table, hasIdentity, func(tx *sql.Tx) error {
+			return w.execChunkedMerge(ctx, tx, table, chunk, columns, failedKeys, errors)
+		}); err != nil {
 			return err
 		}
 
@@ -127,7 +172,7 @@ func (w *mssqlWriter) writeWithUpsert(ctx context.Context, table string, columns
 	return nil
 }
 
-func (w *mssqlWriter) execChunkedMerge(ctx context.Context, table string, rows []mssqlRow, columns []string, failedKeys *[]string, errors *[]error) error {
+func (w *mssqlWriter) execChunkedMerge(ctx context.Context, tx *sql.Tx, table string, rows []mssqlRow, columns []string, failedKeys *[]string, errors *[]error) error {
 	quotedColumns := make([]string, len(columns))
 	for i, col := range columns {
 		quotedColumns[i] = quoteIdentifier(col)
@@ -173,34 +218,38 @@ func (w *mssqlWriter) execChunkedMerge(ctx context.Context, table string, rows [
 		rowPlaceholders[i] = "(" + strings.Join(valPlaceholders, ", ") + ")"
 	}
 
-	var query string
-	if len(updateClauses) > 0 {
+	onStr := strings.Join(onClauses, " AND ")
+	query := fmt.Sprintf(
+		"MERGE INTO %s AS target USING (VALUES %s) AS src (%s) ON (%s) "+
+			"WHEN MATCHED THEN UPDATE SET %s "+
+			"WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);",
+		quoteIdentifier(table),
+		strings.Join(rowPlaceholders, ", "),
+		strings.Join(quotedColumns, ", "),
+		onStr,
+		strings.Join(updateClauses, ", "),
+		strings.Join(quotedColumns, ", "),
+		strings.Join(srcCols, ", "),
+	)
+	if len(updateClauses) == 0 {
 		query = fmt.Sprintf(
-			"MERGE INTO %s AS target USING (VALUES %s) AS src (%s) ON (%s "+
-				"WHEN MATCHED THEN UPDATE SET %s "+
+			"MERGE INTO %s AS target USING (VALUES %s) AS src (%s) ON (%s) "+
 				"WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);",
 			quoteIdentifier(table),
 			strings.Join(rowPlaceholders, ", "),
 			strings.Join(quotedColumns, ", "),
-			strings.Join(onClauses, " AND "),
-			strings.Join(updateClauses, ", "),
-			strings.Join(quotedColumns, ", "),
-			strings.Join(srcCols, ", "),
-		)
-	} else {
-		query = fmt.Sprintf(
-			"MERGE INTO %s AS target USING (VALUES %s) AS src (%s) ON (%s "+
-				"WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);",
-			quoteIdentifier(table),
-			strings.Join(rowPlaceholders, ", "),
-			strings.Join(quotedColumns, ", "),
-			strings.Join(onClauses, " AND "),
+			onStr,
 			strings.Join(quotedColumns, ", "),
 			strings.Join(srcCols, ", "),
 		)
 	}
-
-	_, err := w.db.ExecContext(ctx, query, args...)
+	var executor interface{ ExecContext(context.Context, string, ...any) (sql.Result, error) }
+	if tx != nil {
+		executor = tx
+	} else {
+		executor = w.db
+	}
+	_, err := executor.ExecContext(ctx, query, args...)
 	if err != nil {
 		w.failed += int64(len(rows))
 		for _, row := range rows {
@@ -220,6 +269,7 @@ func (w *mssqlWriter) execChunkedMerge(ctx context.Context, table string, rows [
 }
 
 func (w *mssqlWriter) writeWithSkip(ctx context.Context, table string, columns []string, rows []mssqlRow, failedKeys *[]string, errors *[]error) error {
+	hasIdentity := w.hasIdentityColumn(ctx, table)
 	quotedColumns := make([]string, len(columns))
 	for i, col := range columns {
 		quotedColumns[i] = quoteIdentifier(col)
@@ -236,7 +286,9 @@ func (w *mssqlWriter) writeWithSkip(ctx context.Context, table string, columns [
 		}
 
 		chunk := rows[i:end]
-		if err := w.execChunkedInsertSkip(ctx, table, chunk, columns, quotedColumns, failedKeys, errors); err != nil {
+		if err := w.setIdentityInsert(ctx, table, hasIdentity, func(tx *sql.Tx) error {
+			return w.execChunkedInsertSkip(ctx, tx, table, chunk, columns, quotedColumns, failedKeys, errors)
+		}); err != nil {
 			return err
 		}
 
@@ -246,7 +298,7 @@ func (w *mssqlWriter) writeWithSkip(ctx context.Context, table string, columns [
 	return nil
 }
 
-func (w *mssqlWriter) execChunkedInsertSkip(ctx context.Context, table string, rows []mssqlRow, columns []string, quotedColumns []string, failedKeys *[]string, errors *[]error) error {
+func (w *mssqlWriter) execChunkedInsertSkip(ctx context.Context, tx *sql.Tx, table string, rows []mssqlRow, columns []string, quotedColumns []string, failedKeys *[]string, errors *[]error) error {
 	pkCols := extractPKColumns(rows[0])
 	if len(pkCols) == 0 {
 		pkCols = columns[:1]
@@ -284,7 +336,13 @@ func (w *mssqlWriter) execChunkedInsertSkip(ctx context.Context, table string, r
 		strings.Join(srcCols, ", "),
 	)
 
-	result, err := w.db.ExecContext(ctx, query, args...)
+	var executor interface{ ExecContext(context.Context, string, ...any) (sql.Result, error) }
+	if tx != nil {
+		executor = tx
+	} else {
+		executor = w.db
+	}
+	result, err := executor.ExecContext(ctx, query, args...)
 	if err != nil {
 		w.failed += int64(len(rows))
 		for _, row := range rows {
@@ -311,24 +369,27 @@ func (w *mssqlWriter) estimateChunkSize(rows []mssqlRow, columns []string) int {
 	}
 
 	sampleSize := min(10, len(rows))
-	var avgRowDataSize int
+	maxRowDataSize := 64
 	for i := 0; i < sampleSize; i++ {
+		var rowSize int
 		for _, col := range columns {
 			if v, ok := rows[i].Data[col]; ok {
 				switch val := v.(type) {
 				case string:
-					avgRowDataSize += len(val)
+					rowSize += len(val)
 				case []byte:
-					avgRowDataSize += len(val)
+					rowSize += len(val)
 				default:
-					avgRowDataSize += 64
+					rowSize += 64
 				}
 			}
 		}
+		if rowSize > maxRowDataSize {
+			maxRowDataSize = rowSize
+		}
 	}
-	avgRowDataSize /= sampleSize
 
-	perRow := 20 + int(float64(avgRowDataSize)*1.2)
+	perRow := 20 + int(float64(maxRowDataSize)*1.2)
 	available := maxPacketSize / 2
 	if available <= 0 {
 		return 1
