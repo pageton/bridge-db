@@ -39,31 +39,49 @@ $ bridge migrate \
 ```
 
 ```
-[INIT]
-[CONNECTING]
-[SCHEMA]
-[SCANNING]
-[WRITING] 50000 written | 8200 units/s | 6s | table: users | 1/3 tables | ETA: 12s
-[WRITING] 120000 written | 7600 units/s | 15s | table: orders | 2/3 tables | ETA: 4s
-[WRITING] 150000 written | 7400 units/s | 20s | table: products | 3/3 tables | ETA: 0s
-[VERIFYING]
+Migration: postgresql -> mongodb
+  Workers: 1 | Batch: 1000 | Verify: on | Checkpoint: on
+[1/8] Validating config
+      done (<1µs)
+[2/8] Validating connections
+      done (5.0ms)
+[3/8] Connecting to databases
+      done (150ms)
+[4/8] Inspecting schema
+      skipped
+[5/8] Building migration plan
+      done (1.5s)
+[6/8] Transferring data
+      50000 written | 8200 records/s | 6s | table: users | 1/3 tables | ETA: 12s
+      120000 written | 7600 records/s | 15s | table: orders | 2/3 tables | ETA: 4s
+      150000 written | 7400 records/s | 20s | table: products | 3/3 tables | ETA: 0s
+      done (20s)
+[7/8] Verifying data
+      done (2.5s)
+[8/8] Cleaning up
+      done (<1µs)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Migration Complete
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Duration:     22.4s
-  Records:      150000 scanned / 150000 written / 0 failed / 0 skipped
-  Transferred:  256.3 MiB
-  Throughput:   6696 avg / 8200 peak units/s
-  Verification: PASSED
+✔ Migration completed successfully
+  150000 records written in 22.4s
 
-  Per-table breakdown:
-  Table                              Scanned    Written    Failed        Size
-  ----------------------------------------------------------------------
-  users                              100000     100000          0   128.5 MiB
-  orders                              30000      30000          0   102.4 MiB
-  products                            20000      20000          0    25.4 MiB
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+--- Summary ---
+Source:      postgresql
+Destination: mongodb
+Duration:    22.4s
+
+Records:
+  Written:     150000
+  Transferred: 256.3 MiB
+  Throughput:  6696 avg / 8200 peak records/s
+
+Tables:
+  Table                               Records   Failed       Size
+  ------------------------------------------------------------
+  users                               100000        0   128.5 MiB
+  orders                               30000        0   102.4 MiB
+  products                             20000        0    25.4 MiB
+
+Verification: PASSED (3 tables, 150 sampled, 2.5s)
 ```
 
 150,000 records. Three tables. Postgres to MongoDB. 22 seconds. Verified.
@@ -247,6 +265,16 @@ bridge verify \
 
 Compares row counts and sampled checksums without running a migration.
 
+### Self-update
+
+```sh
+bridge update              # update to the latest version
+bridge update --check      # check only, don't install
+bridge update --version v1.2.0  # update to a specific version
+```
+
+Downloads the latest release from GitHub, verifies the SHA-256 checksum, and replaces the running binary in-place. No new dependencies required.
+
 ### Config file
 
 ```sh
@@ -304,6 +332,16 @@ bridge migrate \
   --dest-url   "mongodb://admin:pass@mongo-cluster:27017/myapp"
 ```
 
+**Migrate a MySQL database to MongoDB:**
+
+```sh
+bridge migrate \
+  --source-url "mysql://root:password@127.0.0.1:3306/ecommerce" \
+  --dest-url   "mongodb://admin:password@127.0.0.1:27017/ecommerce" \
+  --migrate-schema=false \
+  --write-workers 4 --batch-size 2000
+```
+
 **Copy a local SQLite database to Postgres:**
 
 ```sh
@@ -334,6 +372,28 @@ bridge migrate \
 **General** — Large objects (BLOB, BYTEA) work but may be slow over SSH tunnels. Redis TTL is preserved only in Redis-to-Redis migrations.
 
 See [docs/LIMITATIONS.md](docs/LIMITATIONS.md) for the full list.
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | Provider interfaces, registry, capabilities |
+| [docs/configuration.md](docs/configuration.md) | Config file schema, env vars, CLI flags, examples |
+| [docs/pipeline.md](docs/pipeline.md) | 10-step pipeline with code references |
+| [docs/concurrency.md](docs/concurrency.md) | Goroutine layout, backpressure, tuning |
+| [docs/data-model.md](docs/data-model.md) | MigrationUnit, DataType, envelopes |
+| [docs/checkpoint-resume.md](docs/checkpoint-resume.md) | Checkpoint lifecycle, resume flow |
+| [docs/transform.md](docs/transform.md) | Transformer registry, field mapping, null handling |
+| [docs/type-mapping.md](docs/type-mapping.md) | All 19 type mapping tables, lossy conversions, custom mapper |
+| [docs/sql-to-nosql.md](docs/sql-to-nosql.md) | SQL to NoSQL flow with code walkthrough |
+| [docs/nosql-to-sql.md](docs/nosql-to-sql.md) | NoSQL to SQL flow with code walkthrough |
+| [docs/dry-run.md](docs/dry-run.md) | Dry-run modes, output format, validation checklist |
+| [docs/monitoring.md](docs/monitoring.md) | Real-time progress, throughput metrics |
+| [docs/verification.md](docs/verification.md) | Verification levels, interpreting results |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common errors, recovery strategies |
+| [docs/multi-source.md](docs/multi-source.md) | Multi-source consolidation strategy |
+| [docs/LIMITATIONS.md](docs/LIMITATIONS.md) | Comprehensive known limitations |
+| [docs/mcp.md](docs/mcp.md) | MCP server setup and tools |
 
 ## FAQ
 

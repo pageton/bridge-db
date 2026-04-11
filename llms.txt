@@ -1,0 +1,184 @@
+# bridge-db
+
+> High-performance database migration CLI. 8 engines, 64 source-to-destination pairings. Stream data with checkpoint/resume, verification, and SSH tunneling.
+
+## Quick Start
+
+```sh
+# Install
+curl -fsSL https://raw.githubusercontent.com/pageton/bridge-db/main/install.sh | sh
+
+# Basic migration (Postgres to MongoDB)
+bridge migrate --source-url "postgresql://user:pass@localhost:5432/myapp" --dest-url "mongodb://admin:pass@localhost:27017/myapp"
+
+# Dry run (no data written, no connections)
+bridge migrate --dry-run --source-url "mysql://root@localhost/db1" --dest-url "mongodb://localhost/db2"
+
+# Resume interrupted migration
+bridge migrate --resume --source-url "mysql://root@localhost/db1" --dest-url "postgresql://localhost/db2"
+```
+
+## Core Concepts
+
+- **8 pipeline phases**: validate config, validate/tunnel connections, connect, inspect schema, plan, transfer data, verify, finalize
+- **8 providers**: PostgreSQL, MySQL, MariaDB, CockroachDB, MSSQL, SQLite, MongoDB, Redis
+- **37 registered transformer pairs** plus NoopTransformer fallback for unregistered pairs
+- **MigrationUnit data model**: uniform envelope (Key, Table, DataType, Data, Meta, Size) that all providers produce and consume
+- **Streaming pipeline**: single scanner goroutine produces into a buffered channel; N writer goroutines consume concurrently
+
+## Type Mapping
+
+Cross-SQL migrations use 19 concrete type mapping tables to translate column types between database dialects. See docs/type-mapping.md for the complete reference.
+
+- MySQL `TINYINT` -> PostgreSQL `SMALLINT`
+- PostgreSQL `JSONB` -> MySQL `JSON` (lossy: query optimizations lost)
+- PostgreSQL `TIMESTAMPTZ` -> MySQL `DATETIME` (lossy: timezone info lost)
+- PostgreSQL `UUID` -> MySQL `CHAR(36)` (lossy: native UUID operations lost)
+- PostgreSQL `BOOLEAN` -> MySQL `TINYINT(1)`
+- PostgreSQL `SERIAL` -> MySQL `INT AUTO_INCREMENT`
+
+**SQL to NoSQL**: columns become document fields (MongoDB) or hash fields (Redis). No type mapping needed; values pass through as-is. Complex types are JSON-serialized for Redis.
+
+**NoSQL to SQL**: all fields are typed as `TEXT`. Nested documents and arrays are JSON-serialized into single columns.
+
+**Fallback**: unmapped types either fall through verbatim (may cause DDL errors) or map to `TEXT` (SQLite destinations) / `NVARCHAR(MAX)` (MSSQL destinations).
+
+**Custom mapping**: implement the `TypeMapperProvider` interface on your transformer, or use field mappings (`transform.mappings` in config) to convert values at the field level.
+
+See docs/type-mapping.md
+
+## Dry Run
+
+Three dry-run modes, each with increasing depth:
+
+1. **CLI `--dry-run`**: quick config validation, no database connections. Prints provider info, pipeline settings, and capabilities.
+2. **Plan mode**: connects to both databases, inspects schema, builds a MigrationPlan (tables, type mappings, warnings, unsupported fields). No data transfer. Used by MCP tools.
+3. **Full dry-run pipeline**: wraps destination in DryRunWriter. Scans and transforms real data but does not persist. Produces real metrics and throughput numbers.
+
+What to validate before committing: correct table selection, expected row counts, acceptable type mappings (check for lossy conversions), no unexpected unsupported fields, review warnings.
+
+See docs/dry-run.md
+
+## Monitoring
+
+**Real-time console output** (via `ConsoleReporter`):
+
+```
+[6/8] Transferring data
+      1500 written | 2453 records/s | 2m15s elapsed | table: orders | 3/5 tables | ETA: 45s
+```
+
+**Available metrics during migration** (`ProgressStats`):
+- `TotalScanned`, `TotalWritten`, `TotalFailed`, `TotalSkipped`
+- `Throughput` (records/second), `Elapsed`, `EstimatedRemain`
+- `BytesTransferred`, `CurrentBatchID`
+- `TablesCompleted`, `TablesTotal`, `CurrentTable`, `ErrorCount`
+
+**Post-migration summary** (`MigrationSummary`):
+- Per-table breakdown: records scanned, written, failed, bytes, duration, batch count
+- `AvgThroughput`, `PeakThroughput`
+- `FailureSummary`: categorized error counts with example messages
+- Phase timing
+
+See docs/monitoring.md
+
+## Verification
+
+Post-migration verification runs automatically (Step 9). Three levels:
+
+- **Cross**: both providers support verification. CrossVerifier compares row counts per table, samples records (default 5% per table, capped at 10K keys), then compares checksums (same provider type) or field-by-field values (cross-provider) with type coercion.
+- **Basic**: destination-only count check via legacy `Verifier` interface.
+- **None**: neither provider supports verification; skipped with warning.
+
+**Status verdicts**: PASS (migration is trustworthy), WARN (minor issues, spot-check flagged tables), FAIL (significant mismatches, manual inspection required), SKIPPED (manually verify).
+
+See docs/verification.md
+
+## Checkpoint and Resume
+
+Default checkpoint path: `.bridge-db/checkpoint.json` (relative to working directory).
+
+- Checkpoint saved after each successful batch write (atomic file write with temp+rename)
+- SHA-256 config hash prevents resuming with incompatible settings
+- SHA-256 checksum over all fields detects corruption
+- Ring buffer dedup with configurable size (`--max-written-keys`, default 100K)
+- Resume: `bridge migrate --resume --source-url ... --dest-url ...`
+
+See docs/checkpoint-resume.md
+
+## SQL to NoSQL Transformation
+
+**SQL to MongoDB**: each SQL row becomes a MongoDB document. All columns become top-level document fields. `_id` is set to the row key (`table:pk`). Primary key values are sanitized for MongoDB compatibility (spaces, colons, dots, slashes replaced with underscores). Collection name matches the source table name.
+
+**SQL to Redis**: each SQL row becomes a Redis hash key. Key format: `table:primaryKeyValue`. Complex values (maps, arrays) are JSON-serialized to strings. TTL is set to 0.
+
+**Foreign key handling**: FK column values are preserved as flat fields in the document/hash. FK constraints, referential integrity, and ON DELETE/UPDATE actions are not carried over (NoSQL is schemaless). The `RelationHint` metadata is used only for write ordering during migration, not transferred to the destination. See docs/sql-to-nosql.md#foreign-key-handling for workarounds.
+
+**Schema migration**: skipped for NoSQL destinations. No DDL is generated. The `shouldMigrateSchema()` function returns false when the destination is a NoSQL provider.
+
+See docs/sql-to-nosql.md
+
+## NoSQL to SQL Transformation
+
+**MongoDB to SQL**: documents become SQL rows. All fields typed as `TEXT`. Nested documents and arrays are JSON-serialized into single TEXT columns. `_id` becomes the primary key.
+
+**Redis to SQL**: keys become SQL rows. Hash fields become columns; other Redis types produce a single `value` column. A `_key` column is added with the original Redis key. All columns typed as `TEXT`.
+
+See docs/nosql-to-sql.md
+
+## Multi-Source Consolidation
+
+Bridge-db supports single source-to-destination per run. For multi-source consolidation (e.g., PostgreSQL + MySQL + MongoDB into one MongoDB), run sequential migrations with verification between each.
+
+Strategy: migrate independent tables first, verify after each run, handle table name conflicts with field mappings or pre-migration renaming. No cross-source transactional guarantees exist.
+
+See docs/multi-source.md
+
+## Error Handling
+
+8 error categories: config, connection, schema, scan, transform, write, verify, cancelled.
+
+- Retry: exponential backoff with max 30s interval, multiplier 2.0, configurable `--max-retries`
+- Partial failure recovery: individual failed units retried if `--max-per-unit-retry > 0`
+- Checkpoint on cancellation: final checkpoint saved on SIGINT/SIGTERM for clean resume
+- Structured logging: `--log-level debug|info|warn|error`, `--log-json` for machine-readable output
+
+See docs/troubleshooting.md
+
+## Configuration
+
+Config priority: config file -> URL flags -> individual flags.
+
+**Environment variables**: `BRIDGE_SOURCE_URL`, `BRIDGE_DEST_URL`, `BRIDGE_BATCH_SIZE`, `BRIDGE_WRITE_WORKERS`, `BRIDGE_ALLOW_INSECURE_SSH`, `BRIDGE_PARALLEL`.
+
+**YAML config** with `source`, `destination`, and `pipeline` sections. See `configs/` for examples.
+
+## Build Tags
+
+- Base (always compiled): `postgres`, `mysql`, `mariadb`, `cockroachdb`
+- Optional (require build tags): `mongodb`, `mssql`, `sqlite`, `redis`
+- Build all: `make build-all` or `go build -tags "mongodb,mssql,sqlite,redis" ./cmd/bridge`
+- Check compiled providers: `bridge providers`
+
+## Documentation Index
+
+- docs/architecture.md - provider interfaces, registry, capabilities
+- docs/configuration.md - config file schema, env vars, CLI flags, examples for all 8 providers
+- docs/pipeline.md - 10-step pipeline with code references
+- docs/concurrency.md - goroutine layout, backpressure, tuning
+- docs/data-model.md - MigrationUnit, DataType, envelopes
+- docs/data-flow.md - end-to-end flow diagram
+- docs/checkpoint-resume.md - checkpoint lifecycle, resume flow
+- docs/transform.md - transformer registry, field mapping, null handling
+- docs/transformation.md - transformation overview with diagrams
+- docs/sql-to-nosql.md - SQL to NoSQL flow with code walkthrough
+- docs/nosql-to-sql.md - NoSQL to SQL flow with code walkthrough
+- docs/type-mapping.md - all 19 type mapping tables, lossy conversions, custom mapper
+- docs/dry-run.md - dry-run modes, output format, validation checklist
+- docs/monitoring.md - real-time progress, throughput metrics, MigrationSummary
+- docs/verification.md - verification levels, CrossVerifier, interpreting results
+- docs/troubleshooting.md - common errors, recovery strategies, cross-engine pitfalls
+- docs/multi-source.md - multi-source consolidation strategy
+- docs/LIMITATIONS.md - comprehensive known limitations
+- docs/mcp.md - MCP server setup, client integrations, available tools
+- docs/mcp-system-design.md - MCP architecture proposal

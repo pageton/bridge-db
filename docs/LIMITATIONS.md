@@ -150,6 +150,10 @@ Verification (`--verify`) checks data integrity after migration. It is not a ful
 
 ## General Limitations
 
+### Multi-source consolidation
+
+Bridge-db supports single source-to-destination per run. There is no built-in multi-source orchestration. For consolidating data from multiple databases into one destination, run sequential migrations and verify after each. See [docs/multi-source.md](multi-source.md) for the full strategy guide.
+
 ### Migration model
 
 - **Point-in-time snapshot**, not live sync. Changes made to the source after the scan starts are not captured. There is no CDC (change data capture) support.
@@ -228,3 +232,16 @@ Verification (`--verify`) checks data integrity after migration. It is not a ful
 | Database users and permissions          | Recreate on the destination                                              |
 | Collation-specific sorting              | Set collation on the destination columns                                 |
 | Spatial types (`GEOMETRY`, `GEOGRAPHY`) | Export/import separately or use a specialized tool                       |
+
+---
+
+## Further Reading
+
+| Topic | Document |
+|---|---|
+| Complete type mapping tables | [docs/type-mapping.md](type-mapping.md) |
+| Dry-run modes and validation | [docs/dry-run.md](dry-run.md) |
+| Real-time monitoring and metrics | [docs/monitoring.md](monitoring.md) |
+| Verification levels and interpretation | [docs/verification.md](verification.md) |
+| Common errors and recovery | [docs/troubleshooting.md](troubleshooting.md) |
+| Multi-source consolidation | [docs/multi-source.md](multi-source.md) |

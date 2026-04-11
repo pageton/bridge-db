@@ -39,6 +39,8 @@ type Checkpoint struct {
 | `ResumeToken`       | Opaque scanner cursor (provider-specific stats)                     |
 | `Checksum`          | SHA-256 over all other fields for corruption detection              |
 
+The default checkpoint file path is `.bridge-db/checkpoint.json` relative to the working directory.
+
 ## FileCheckpointStore
 
 **File: `internal/bridge/checkpoint.go:157-257`**

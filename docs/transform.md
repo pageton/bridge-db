@@ -465,6 +465,97 @@ var lossyPairs = []struct{ src, dst string }{
 
 These are surfaced in `MigrationPlan.UnsupportedFields` during planning.
 
+## planTypeMappings function
+
+**File:** `internal/bridge/plan.go:171-233`
+
+During the plan phase (Step 5), the pipeline calls `planTypeMappings()` to build an advisory type mapping report. This function does **not** modify data — it only populates the `MigrationPlan` with type conversion information and warnings.
+
+### How it works
+
+1. **Early return** if not a cross-database migration (`!p.config.IsCrossDB()`).
+2. **Resolve the TypeMapper**: checks if the transformer implements `TypeMapperProvider`. If not, returns immediately (no type mapping available).
+3. **Inspect source schema**: calls `src.SchemaMigrator(ctx).Inspect(ctx)` to get column types for all tables. Returns with a warning if inspection fails.
+4. **Iterate columns**: for each table and column:
+   - Calls `mapper.MapType(col.Type)` to get the destination type.
+   - If `ok == false` (unmapped type): records an `UnsupportedField` with reason `"no type mapping for source type"`.
+   - If mapping succeeds: builds a `ColumnTypeMapping` with source type, dest type, whether conversion is needed, and whether it is lossy.
+   - Lossy conversions (e.g., `TIMESTAMPTZ → TIMESTAMP` loses timezone) are flagged with a warning.
+5. **Populate plan**: each table gets a `TableTypeMapping` with its column mappings.
+
+### Output
+
+The results appear in `MigrationPlan.TypeMappings` (per-table column mappings) and `MigrationPlan.UnsupportedFields` (warnings for unmapped or lossy types). See [docs/type-mapping.md](type-mapping.md) for the complete mapping tables.
+
+## Custom TypeMapper Example
+
+To override type mapping for specific column types, implement the `TypeMapperProvider` interface on your transformer:
+
+```go
+package transform
+
+import (
+    "strings"
+    "context"
+    "github.com/pageton/bridge-db/pkg/provider"
+)
+
+type customMySQLToPostgres struct {
+    NoopTransformer
+}
+
+// TypeMapper provides custom type mapping
+func (t *customMySQLToPostgres) TypeMapper() provider.TypeMapper {
+    return &customMapper{}
+}
+
+type customMapper struct{}
+
+func (m *customMapper) MapType(colType string) (string, bool) {
+    // Custom override: map MONEY to NUMERIC(19,4) for currency precision
+    if strings.HasPrefix(colType, "MONEY") {
+        return "NUMERIC(19,4)", true
+    }
+    // Custom override: map TINYINT(1) to BOOLEAN instead of SMALLINT
+    if colType == "tinyint(1)" {
+        return "BOOLEAN", true
+    }
+    // Fall through to default mapping for all other types
+    return "", false
+}
+
+func (t *customMySQLToPostgres) Transform(ctx context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
+    return units, nil
+}
+
+func (t *customMySQLToPostgres) NeedsSchema() bool { return false }
+func (t *customMySQLToPostgres) SetSchema(schema *provider.Schema) {}
+```
+
+For field-level value conversion without a custom transformer, use field mappings in the config file:
+
+```yaml
+transform:
+  mappings:
+    - table: orders
+      source: total
+      destination: total
+      action: convert
+      convert: "float"
+    - table: users
+      source: is_active
+      destination: active
+      action: convert
+      convert: "bool"
+    - table: events
+      source: created_at
+      destination: created_at
+      action: convert
+      convert: "timestamp:mysql:postgres"
+```
+
+See [docs/type-mapping.md](type-mapping.md#custom-type-mapper) for the full custom mapper reference.
+
 ## Files involved
 
 | File                                       | Role                                                                  |
@@ -480,4 +571,5 @@ These are surfaced in `MigrationPlan.UnsupportedFields` during planning.
 | `internal/transform/sql_to_sql.go`         | `BuildSQLToSQLStages`, `AdjustSchemaField`, `ConvertTimestampColumns` |
 | `internal/transform/redis_to_mongo.go`     | Redis→MongoDB transformer (all Redis types)                           |
 | `internal/transform/mongo_to_redis.go`     | MongoDB→Redis transformer (documents→hashes)                          |
+| `internal/bridge/plan.go`                  | `planTypeMappings()`, lossy conversion detection                      |
 | `internal/config/config.go:527-561`        | `TransformConfig`, `FieldMapping` config types                        |

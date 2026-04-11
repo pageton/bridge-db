@@ -367,6 +367,145 @@ for _, sub := range splitBatch(units, p.opts.MaxBatchBytes) {
 | Schema name        | Dropped                    | Dropped                         |
 | Foreign key hints  | Dropped                    | Dropped                         |
 
+## Foreign Key Handling
+
+### What happens to foreign keys
+
+When migrating from SQL to NoSQL, foreign key column **values** are preserved as flat document/hash fields, but FK **constraints** are not carried over. This is a fundamental architectural difference — NoSQL databases are schemaless and do not enforce referential integrity.
+
+**Example**: An `orders` table with `user_id` referencing `users.id`:
+
+```sql
+-- Source SQL
+CREATE TABLE orders (
+    id INT PRIMARY KEY,
+    user_id INT REFERENCES users(id),
+    total DECIMAL(10,2)
+);
+```
+
+After migration to MongoDB:
+
+```json
+{
+  "_id": "orders:1",
+  "id": 1,
+  "user_id": 42,
+  "total": 99.99
+}
+```
+
+The `user_id` value (42) is preserved as a regular document field. But:
+- There is no validation that `user_id` 42 exists in the `users` collection.
+- Deleting a user document does not cascade to orders.
+- The relationship exists only as data, not as a constraint.
+
+The `RelationHint` metadata on `UnitMeta.Relations` is used **only during migration** for write ordering (parent tables before child tables when `--fk-handling ordered`). It is not transferred to the destination.
+
+### Why schema migration is skipped for NoSQL
+
+NoSQL destinations are schemaless — there is no DDL to generate. The `shouldMigrateSchema()` function returns `false` when the destination provider does not support schema migration (MongoDB, Redis). Collections and keys are created implicitly on first write.
+
+### Workarounds for FK data
+
+#### Pre-migration denormalization with SQL views
+
+Create a SQL view that JOINs related tables, then migrate the view as a flat document:
+
+```sql
+-- On the SQL source, create a denormalized view
+CREATE VIEW order_details AS
+SELECT
+    o.id AS order_id,
+    o.total,
+    o.created_at,
+    u.id AS user_id,
+    u.name AS user_name,
+    u.email AS user_email,
+    p.id AS product_id,
+    p.name AS product_name,
+    p.price AS product_price
+FROM orders o
+JOIN users u ON o.user_id = u.id
+JOIN order_items oi ON o.id = oi.order_id
+JOIN products p ON oi.product_id = p.id;
+```
+
+Then migrate the view (bridge-db scans all tables/views):
+
+```sh
+bridge migrate \
+  --source-url "mysql://root@localhost/myapp" \
+  --dest-url "mongodb://localhost/myapp" \
+  --tables order_details
+```
+
+Result: each document contains both order and user data, fully denormalized.
+
+#### Post-migration embedding with MongoDB aggregation
+
+After migrating normalized collections, use MongoDB's `$lookup` and `$merge` to embed related data:
+
+```javascript
+// In mongosh
+db.orders.aggregate([
+  { $lookup: {
+      from: "users",
+      localField: "user_id",
+      foreignField: "id",
+      as: "user"
+  }},
+  { $unwind: "$user" },
+  { $merge: { into: "orders", whenMatched: "replace" } }
+]);
+```
+
+#### Application-level references
+
+Keep data normalized and handle joins in application code using the preserved FK column values:
+
+```javascript
+// Application code
+const order = await db.collection("orders").findOne({ _id: "orders:1" });
+const user = await db.collection("users").findOne({ id: order.user_id });
+```
+
+#### Schema design for 1:1 and 1:few relationships
+
+For relationships that are always accessed together (e.g., user and profile), restructure as embedded documents before migration:
+
+```sql
+-- Pre-migration: flatten into a single table
+CREATE VIEW user_profiles AS
+SELECT u.*, p.bio, p.avatar_url
+FROM users u
+LEFT JOIN profiles p ON u.id = p.user_id;
+```
+
+## `_id` Derivation Rules
+
+The `SQLToMongoDB()` function derives the document `_id` from the primary key:
+
+1. The `primary_key` map from the SQL envelope is sanitized via `sanitizeDocID()`.
+2. Special characters (spaces, colons, dots, slashes) are replaced with underscores.
+3. The first primary key value is used. Composite keys are concatenated.
+4. Falls back to `unit.Key` (format: `"table:pk1:pk2"`) if no primary key is available.
+
+The `document_id` field in the MongoDB envelope contains the sanitized primary key value, while `_id` in the document is set to the full `unit.Key`.
+
+## MySQL to MongoDB Example
+
+```sh
+bridge migrate \
+  --source-url "mysql://root:password@127.0.0.1:3306/ecommerce" \
+  --dest-url "mongodb://admin:password@127.0.0.1:27017/ecommerce" \
+  --migrate-schema=false \
+  --write-workers 4 --batch-size 2000 \
+  --verify
+```
+
+Source MySQL tables `users`, `orders`, `products` become MongoDB collections with the same names. Each row becomes a document with all columns as top-level fields. FK columns (`orders.user_id`, `order_items.product_id`) are preserved as flat fields.
+
 ## Files involved
 
 | File                                  | Role                                                     |
