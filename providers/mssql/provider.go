@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/microsoft/go-mssqldb"
 
@@ -60,6 +61,9 @@ func (p *MSSQLProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 	if err != nil {
 		return fmt.Errorf("mssql %s connect: %w", p.role, err)
 	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
 	p.db = db
 
 	log := logger.L().With("provider", "mssql", "role", p.role)

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
@@ -74,6 +75,9 @@ func (p *MySQLProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 	if err != nil {
 		return fmt.Errorf("mysql %s connect: %w", p.role, err)
 	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
 	p.db = db
 
 	log := logger.L().With("provider", "mysql", "role", p.role)

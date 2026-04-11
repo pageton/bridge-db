@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
@@ -57,6 +58,9 @@ func (p *MariaDBProvider) Connect(_ context.Context, srcConfig, dstConfig any) e
 	if err != nil {
 		return fmt.Errorf("mariadb %s connect: %w", p.role, err)
 	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
 	p.db = db
 
 	log := logger.L().With("provider", "mariadb", "role", p.role)
