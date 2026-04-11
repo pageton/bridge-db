@@ -173,9 +173,14 @@ func NewFileCheckpointStore(path string) (*FileCheckpointStore, error) {
 }
 
 // Save writes the checkpoint to a JSON file atomically.
-func (s *FileCheckpointStore) Save(_ context.Context, cp *Checkpoint) error {
+func (s *FileCheckpointStore) Save(ctx context.Context, cp *Checkpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Check cancellation before acquiring resources.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("checkpoint save cancelled: %w", err)
+	}
 
 	// Compute and set checksum before serializing.
 	cp.Checksum = cp.computeChecksum()
@@ -191,6 +196,9 @@ func (s *FileCheckpointStore) Save(_ context.Context, cp *Checkpoint) error {
 			return fmt.Errorf("create checkpoint directory: %w", err)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("checkpoint save cancelled before write: %w", err)
+	}
 	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		return fmt.Errorf("write checkpoint temp: %w", err)
 	}
@@ -205,9 +213,13 @@ func (s *FileCheckpointStore) Save(_ context.Context, cp *Checkpoint) error {
 
 // Load reads the checkpoint from the JSON file.
 // Returns nil if the file does not exist.
-func (s *FileCheckpointStore) Load(_ context.Context) (*Checkpoint, error) {
+func (s *FileCheckpointStore) Load(ctx context.Context) (*Checkpoint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("checkpoint load cancelled: %w", err)
+	}
 
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -245,9 +257,13 @@ func (s *FileCheckpointStore) Load(_ context.Context) (*Checkpoint, error) {
 }
 
 // Clear removes the checkpoint file.
-func (s *FileCheckpointStore) Clear(_ context.Context) error {
+func (s *FileCheckpointStore) Clear(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("checkpoint clear cancelled: %w", err)
+	}
 
 	err := os.Remove(s.path)
 	if err != nil && !os.IsNotExist(err) {

@@ -176,14 +176,12 @@ func (bw *batchWriter) flush(ctx context.Context) error {
 
 // filterWritten removes keys that have already been written in this migration
 // run. Returns the filtered slice and the number of skipped units.
+// Lock-free: sync.Map handles concurrent access without a mutex.
 func (p *Pipeline) filterWritten(units []provider.MigrationUnit) ([]provider.MigrationUnit, int) {
-	p.keyMu.Lock()
-	defer p.keyMu.Unlock()
-
 	filtered := make([]provider.MigrationUnit, 0, len(units))
 	skipped := 0
 	for _, u := range units {
-		if p.writtenKeySet[u.Key] {
+		if _, ok := p.writtenKeys.Load(hashKey(u.Key)); ok {
 			skipped++
 			continue
 		}

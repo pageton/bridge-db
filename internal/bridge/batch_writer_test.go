@@ -27,9 +27,8 @@ func TestBatchWriter_FullSuccess(t *testing.T) {
 		},
 	}
 	p := &Pipeline{
-		writtenKeySet: make(map[string]bool),
-		keyRing:       make([]string, 1024),
-		tableSet:      make(map[string]bool),
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
 	}
 	p.keyRingHead = 0
 	p.keyRingLen = 0
@@ -65,10 +64,11 @@ func TestBatchWriter_Dedup(t *testing.T) {
 		},
 	}
 	p := &Pipeline{
-		writtenKeySet: map[string]bool{"users:00": true, "users:10": true},
-		keyRing:       make([]string, 1024),
-		tableSet:      make(map[string]bool),
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
 	}
+	p.writtenKeys.Store(hashKey("users:00"), true)
+	p.writtenKeys.Store(hashKey("users:10"), true)
 
 	units := makeTestUnits(5, "users")
 	out := bw.writeBatch(context.Background(), p, units)
@@ -98,15 +98,13 @@ func TestBatchWriter_DedupAll(t *testing.T) {
 		},
 	}
 
-	keySet := make(map[string]bool)
+	p := &Pipeline{
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
+	}
 	for i := 0; i < 5; i++ {
 		key := fmt.Sprintf("users:%c%c", rune('0'+i%10), rune('0'+i/10))
-		keySet[key] = true
-	}
-	p := &Pipeline{
-		writtenKeySet: keySet,
-		keyRing:       make([]string, 1024),
-		tableSet:      make(map[string]bool),
+		p.writtenKeys.Store(hashKey(key), true)
 	}
 
 	units := makeTestUnits(5, "users")
@@ -131,9 +129,8 @@ func TestBatchWriter_WholeBatchFailWithRetry(t *testing.T) {
 		},
 	}
 	p := &Pipeline{
-		writtenKeySet: make(map[string]bool),
-		keyRing:       make([]string, 1024),
-		tableSet:      make(map[string]bool),
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
 	}
 
 	units := makeTestUnits(3, "t")
@@ -170,9 +167,8 @@ func TestBatchWriter_PartialFailure_IndividualRetry(t *testing.T) {
 		},
 	}
 	p := &Pipeline{
-		writtenKeySet: make(map[string]bool),
-		keyRing:       make([]string, 1024),
-		tableSet:      make(map[string]bool),
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
 	}
 
 	units := makeTestUnits(3, "users")
@@ -207,9 +203,8 @@ func TestBatchWriter_PartialFailure_IndividualRetryFails(t *testing.T) {
 		},
 	}
 	p := &Pipeline{
-		writtenKeySet: make(map[string]bool),
-		keyRing:       make([]string, 1024),
-		tableSet:      make(map[string]bool),
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
 	}
 
 	units := makeTestUnits(3, "users")
@@ -237,9 +232,8 @@ func TestBatchWriter_EmptyBatch(t *testing.T) {
 		cfg: writeConfig{MaxRetries: 1},
 	}
 	p := &Pipeline{
-		writtenKeySet: make(map[string]bool),
-		keyRing:       make([]string, 1024),
-		tableSet:      make(map[string]bool),
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
 	}
 
 	out := bw.writeBatch(context.Background(), p, nil)
@@ -256,9 +250,8 @@ func TestProcessWriteOutcome_RecordsMetrics(t *testing.T) {
 	bw := &batchWriter{w: w, cfg: writeConfig{MaxPerUnitRetry: 0}}
 	p := &Pipeline{
 		opts:          PipelineOptions{MaxWrittenKeys: 1024},
-		writtenKeySet: make(map[string]bool),
-		keyRing:       make([]string, 1024),
-		tableSet:      make(map[string]bool),
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
 	}
 	reporter := &noopReporter{}
 	mc := &testMetricsRecorder{}
@@ -281,9 +274,8 @@ func TestProcessWriteOutcome_WholeBatchFail(t *testing.T) {
 		cfg: writeConfig{MaxRetries: 0},
 	}
 	p := &Pipeline{
-		writtenKeySet: make(map[string]bool),
-		keyRing:       make([]string, 1024),
-		tableSet:      make(map[string]bool),
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
 	}
 	reporter := &noopReporter{}
 	mc := &testMetricsRecorder{}

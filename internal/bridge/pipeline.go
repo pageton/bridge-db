@@ -58,14 +58,14 @@ type Pipeline struct {
 	keyRing       []string
 	keyRingHead   int
 	keyRingLen    int
-	writtenKeySet map[string]bool
+	writtenKeys   sync.Map // map[string]bool — lock-free dedup checks
 	totalWritten  int64
 	startTime     time.Time
 	scannedTables []string
 	tableSet      map[string]bool
 	keysEvicted   bool // true when key dedup set exceeded MaxWrittenKeys
 
-	// keyMu protects keyRing and writtenKeySet for concurrent access.
+	// keyMu protects keyRing for concurrent ring buffer access.
 	keyMu sync.Mutex
 	// cpMu serialises checkpoint writes across concurrent workers.
 	cpMu           sync.Mutex
@@ -90,15 +90,14 @@ func NewPipeline(cfg *config.MigrationConfig, opts PipelineOptions, reporter pro
 		}
 	}
 	p := &Pipeline{
-		config:        cfg,
-		opts:          opts,
-		reporter:      reporter,
-		metrics:       progress.NewMetricsCollector(),
-		checkpoint:    cpStore,
-		tunnels:       tunnel.NewPool(),
-		keyRing:       make([]string, 1024),
-		writtenKeySet: make(map[string]bool, 1024),
-		tableSet:      make(map[string]bool),
+		config:     cfg,
+		opts:       opts,
+		reporter:   reporter,
+		metrics:    progress.NewMetricsCollector(),
+		checkpoint: cpStore,
+		tunnels:    tunnel.NewPool(),
+		keyRing:    make([]string, 1024),
+		tableSet:   make(map[string]bool),
 	}
 	p.pauseCond = sync.NewCond(&sync.Mutex{})
 	return p, nil
@@ -138,21 +137,20 @@ func phaseDesc(phase provider.MigrationPhase) provider.PhaseDesc {
 	return provider.PhaseDesc{Phase: phase, Step: 0, TotalSteps: len(visiblePhases), Description: string(phase)}
 }
 
-// Run executes the full migration pipeline following a 10-step sequence:
+// Run executes the full migration pipeline in 8 visible phases.
+// Internally, the "Transferring data" phase decomposes into three
+// concurrent substeps (extract, transform, write) via a producer-consumer pipeline.
 //
-//  1. Load config        — validate pipeline options
-//  2. Validate           — establish SSH tunnels
-//  3. Initialize         — connect to source and destination
-//  4. Inspect            — load checkpoint, inspect and migrate schema
-//  5. Plan               — handle resume, prepare scan/write options
-//  6. Extract            — read batches from source (scanner goroutine)
-//  7. Transform          — apply data transformation (inline in scanner)
-//  8. Write              — persist batches to destination (writer goroutines)
-//  9. Verify             — compare source and destination data
+// User-visible phases:
 //
-// 10. Finalize           — build summary, clear checkpoint, report completion
-//
-// Steps 6–8 run concurrently via a producer-consumer pipeline.
+//  1. Validating config
+//  2. Validating connections (SSH tunnels)
+//  3. Connecting to databases
+//  4. Inspecting schema
+//  5. Building migration plan
+//  6. Transferring data  (extract → transform → write, concurrent)
+//  7. Verifying data
+//  8. Cleaning up
 func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	p.cancelFn = cancel
@@ -231,6 +229,65 @@ func (p *Pipeline) Run(ctx context.Context) (*RunResult, error) {
 
 	// Step 10: Finalize — build summary, clear checkpoint, report completion.
 	p.stepFinalize(ctx, result, ms)
+
+	return result, nil
+}
+
+// Plan executes the pipeline only through the planning phase and returns the
+// structured MigrationPlan without transferring or verifying data.
+func (p *Pipeline) Plan(ctx context.Context) (*RunResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	p.cancelFn = cancel
+	defer cancel()
+
+	result := &RunResult{
+		Config:      p.config,
+		SrcProvider: p.config.Source.Provider,
+		DstProvider: p.config.Destination.Provider,
+		Failures:    NewFailureSummary(),
+	}
+
+	ms := &migrationState{
+		summary: &provider.MigrationSummary{
+			StartTime: time.Now(),
+		},
+	}
+	p.startTime = ms.summary.StartTime
+
+	if err := p.stepLoadConfig(result); err != nil {
+		return nil, err
+	}
+	if err := p.stepValidate(ctx, result); err != nil {
+		return nil, err
+	}
+	defer func() { _ = p.tunnels.CloseAll() }()
+
+	if err := p.stepInitProviders(ctx, result); err != nil {
+		return nil, err
+	}
+	defer func() {
+		done := make(chan struct{})
+		go func() { _ = p.src.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}()
+	defer func() {
+		done := make(chan struct{})
+		go func() { _ = p.dst.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}()
+
+	if err := p.stepInspect(ctx, result, ms); err != nil {
+		return nil, err
+	}
+	if err := p.stepPlan(ctx, result, ms); err != nil {
+		return nil, err
+	}
 
 	return result, nil
 }
@@ -468,7 +525,7 @@ func (p *Pipeline) stepPlan(ctx context.Context, result *RunResult, ms *migratio
 		// eviction by recordKeys.
 		if len(ms.checkpoint.WrittenKeys) > 0 {
 			for _, k := range ms.checkpoint.WrittenKeys {
-				p.writtenKeySet[k] = true
+				p.writtenKeys.Store(k, true)
 			}
 			ringSize := len(ms.checkpoint.WrittenKeys)
 			if ringSize < p.opts.MaxWrittenKeys {
@@ -947,47 +1004,57 @@ func (p *Pipeline) waitIfPaused() {
 // Key tracking
 // ---------------------------------------------------------------------------
 
+// hashKey returns a truncated SHA-256 hash of a key for dedup tracking.
+// This avoids storing raw key names (which may contain sensitive data like
+// Redis key patterns) in memory and on-disk checkpoints.
+func hashKey(key string) string {
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:8]) // 16 hex chars = 64 bits, sufficient for dedup
+}
+
 // recordKeys adds unit keys to the tracking set, evicting the oldest entries
 // when the capacity (opts.MaxWrittenKeys) is exceeded. Uses a ring buffer
-// for O(1) eviction.
+// for O(1) eviction and sync.Map for lock-free dedup checks on the read path.
 func (p *Pipeline) recordKeys(units []provider.MigrationUnit) {
-	p.keyMu.Lock()
-	defer p.keyMu.Unlock()
-
 	cap := p.opts.MaxWrittenKeys
 
 	// Grow ring buffer if needed (e.g. after restore from checkpoint).
+	p.keyMu.Lock()
 	if cap > len(p.keyRing) {
 		newRing := make([]string, cap)
 		copy(newRing, p.keyRing)
 		p.keyRing = newRing
 	}
+	p.keyMu.Unlock()
 
 	for _, u := range units {
+		hk := hashKey(u.Key)
+
+		// Lock-free dedup check — sync.Map.LoadOrStore is atomic.
+		if _, loaded := p.writtenKeys.LoadOrStore(hk, true); loaded {
+			continue
+		}
+
+		// Ring buffer eviction/insertion and table tracking need a mutex
+		// for ordered access and safe writes to tableSet/scannedTables.
+		p.keyMu.Lock()
 		if u.Table != "" && !p.tableSet[u.Table] {
 			p.tableSet[u.Table] = true
 			p.scannedTables = append(p.scannedTables, u.Table)
 		}
-		if p.writtenKeySet[u.Key] {
-			continue
-		}
-		p.writtenKeySet[u.Key] = true
-
-		// Evict oldest entry if ring is full.
 		if p.keyRingLen >= cap {
 			evictIdx := p.keyRingHead
-			delete(p.writtenKeySet, p.keyRing[evictIdx])
+			p.writtenKeys.Delete(p.keyRing[evictIdx])
 			p.keyRingLen--
 			p.keysEvicted = true
 		}
-
-		// Insert at head position.
-		p.keyRing[p.keyRingHead] = u.Key
+		p.keyRing[p.keyRingHead] = hk
 		p.keyRingHead = (p.keyRingHead + 1) % cap
 		p.keyRingLen++
+		p.keyMu.Unlock()
 	}
 
-	p.totalWritten += int64(len(units))
+	atomic.AddInt64(&p.totalWritten, int64(len(units)))
 }
 
 // writtenKeysFlat materialises the ring buffer as a flat slice for consumers
@@ -1032,8 +1099,8 @@ func (p *Pipeline) saveCheckpoint(ctx context.Context, batchID int, scanner prov
 
 	p.keyMu.Lock()
 	keysFlat := p.writtenKeysFlat()
-	totalWritten := p.totalWritten
 	p.keyMu.Unlock()
+	totalWritten := atomic.LoadInt64(&p.totalWritten)
 
 	var token []byte
 	if stats.TotalScanned > 0 {
@@ -1244,71 +1311,15 @@ func (p *Pipeline) migrateSchema(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 
 func hostFromConnection(cfg config.ConnectionConfig) string {
-	switch cfg.Provider {
-	case "redis":
-		if cfg.Redis != nil {
-			return cfg.Redis.Host
-		}
-	case "mongodb":
-		if cfg.MongoDB != nil {
-			return cfg.MongoDB.Host
-		}
-	case "postgres":
-		if cfg.Postgres != nil {
-			return cfg.Postgres.Host
-		}
-	case "mysql":
-		if cfg.MySQL != nil {
-			return cfg.MySQL.Host
-		}
-	case "mariadb":
-		if cfg.MariaDB != nil {
-			return cfg.MariaDB.Host
-		}
-	case "cockroachdb":
-		if cfg.CockroachDB != nil {
-			return cfg.CockroachDB.Host
-		}
-	case "mssql":
-		if cfg.MSSQL != nil {
-			return cfg.MSSQL.Host
-		}
-	case "sqlite":
+	if r := cfg.Resolved(); r != nil {
+		return r.GetHost()
 	}
 	return ""
 }
 
 func portFromConnection(cfg config.ConnectionConfig) int {
-	switch cfg.Provider {
-	case "redis":
-		if cfg.Redis != nil {
-			return cfg.Redis.Port
-		}
-	case "mongodb":
-		if cfg.MongoDB != nil {
-			return cfg.MongoDB.Port
-		}
-	case "postgres":
-		if cfg.Postgres != nil {
-			return cfg.Postgres.Port
-		}
-	case "mysql":
-		if cfg.MySQL != nil {
-			return cfg.MySQL.Port
-		}
-	case "mariadb":
-		if cfg.MariaDB != nil {
-			return cfg.MariaDB.Port
-		}
-	case "cockroachdb":
-		if cfg.CockroachDB != nil {
-			return cfg.CockroachDB.Port
-		}
-	case "mssql":
-		if cfg.MSSQL != nil {
-			return cfg.MSSQL.Port
-		}
-	case "sqlite":
+	if r := cfg.Resolved(); r != nil {
+		return r.GetPort()
 	}
 	return 0
 }
@@ -1433,41 +1444,16 @@ func computeConfigHash(cfg *config.MigrationConfig) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// ComputeConfigHash returns a deterministic hash of key config fields used to
+// validate checkpoint resume compatibility.
+func ComputeConfigHash(cfg *config.MigrationConfig) string {
+	return computeConfigHash(cfg)
+}
+
 // dbFromConnection returns the database name from connection config.
 func dbFromConnection(cfg config.ConnectionConfig) string {
-	switch cfg.Provider {
-	case "redis":
-		if cfg.Redis != nil {
-			return fmt.Sprintf("%d", cfg.Redis.DB)
-		}
-	case "mongodb":
-		if cfg.MongoDB != nil {
-			return cfg.MongoDB.Database
-		}
-	case "postgres":
-		if cfg.Postgres != nil {
-			return cfg.Postgres.Database
-		}
-	case "mysql":
-		if cfg.MySQL != nil {
-			return cfg.MySQL.Database
-		}
-	case "mariadb":
-		if cfg.MariaDB != nil {
-			return cfg.MariaDB.Database
-		}
-	case "cockroachdb":
-		if cfg.CockroachDB != nil {
-			return cfg.CockroachDB.Database
-		}
-	case "mssql":
-		if cfg.MSSQL != nil {
-			return cfg.MSSQL.Database
-		}
-	case "sqlite":
-		if cfg.SQLite != nil {
-			return cfg.SQLite.Path
-		}
+	if r := cfg.Resolved(); r != nil {
+		return r.GetDatabase()
 	}
 	return ""
 }

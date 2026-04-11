@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,17 +105,17 @@ func TestRecordKeys_Eviction(t *testing.T) {
 	}
 
 	// Oldest keys should be evicted from the set
-	if p.writtenKeySet["a"] {
+	if _, ok := p.writtenKeys.Load(hashKey("a")); ok {
 		t.Error("key 'a' should have been evicted")
 	}
-	if p.writtenKeySet["b"] {
+	if _, ok := p.writtenKeys.Load(hashKey("b")); ok {
 		t.Error("key 'b' should have been evicted")
 	}
-	if p.writtenKeySet["c"] {
+	if _, ok := p.writtenKeys.Load(hashKey("c")); ok {
 		t.Error("key 'c' should have been evicted")
 	}
 	// Newest keys should remain
-	if !p.writtenKeySet["f"] {
+	if _, ok := p.writtenKeys.Load(hashKey("f")); !ok {
 		t.Error("key 'f' should still be tracked")
 	}
 }
@@ -526,9 +527,8 @@ func newTestPipeline(maxKeys int) *Pipeline {
 			MaxWrittenKeys:     maxKeys,
 			CheckpointInterval: 0,
 		},
-		keyRing:       make([]string, 1024),
-		writtenKeySet: make(map[string]bool, 1024),
-		tableSet:      make(map[string]bool),
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
 	}
 }
 
@@ -803,10 +803,10 @@ func TestConfigHash_IncludesPipelineOpts(t *testing.T) {
 func TestKeyRestore_RingBufferSize(t *testing.T) {
 	p := newTestPipeline(100) // MaxWrittenKeys = 100
 
-	// Simulate a checkpoint with 80 keys (fewer than MaxWrittenKeys).
+	// Simulate a checkpoint with 80 hashed keys (fewer than MaxWrittenKeys).
 	keys := make([]string, 80)
 	for i := range keys {
-		keys[i] = fmt.Sprintf("key_%d", i)
+		keys[i] = hashKey(fmt.Sprintf("key_%d", i))
 	}
 	cp := &Checkpoint{
 		SourceProvider: "postgres",
@@ -823,7 +823,7 @@ func TestKeyRestore_RingBufferSize(t *testing.T) {
 	// Manually restore keys (mirroring stepPlan logic).
 	if len(cp.WrittenKeys) > 0 {
 		for _, k := range cp.WrittenKeys {
-			p.writtenKeySet[k] = true
+			p.writtenKeys.Store(k, true)
 		}
 		ringSize := len(cp.WrittenKeys)
 		if ringSize < p.opts.MaxWrittenKeys {
@@ -834,16 +834,21 @@ func TestKeyRestore_RingBufferSize(t *testing.T) {
 		p.keyRing = ring
 		p.keyRingLen = len(cp.WrittenKeys)
 		p.keyRingHead = len(cp.WrittenKeys) % ringSize
-		p.totalWritten = cp.TotalWritten
+		atomic.StoreInt64(&p.totalWritten, cp.TotalWritten)
 	}
 
 	// Ring should be at least MaxWrittenKeys.
 	if len(p.keyRing) < p.opts.MaxWrittenKeys {
 		t.Errorf("ring size %d < MaxWrittenKeys %d", len(p.keyRing), p.opts.MaxWrittenKeys)
 	}
-	// All 80 keys should be in the set.
-	if len(p.writtenKeySet) != 80 {
-		t.Errorf("expected 80 keys in set, got %d", len(p.writtenKeySet))
+	// All 80 keys should be in the set — count via range over ring.
+	restoredCount := 0
+	p.writtenKeys.Range(func(_, _ any) bool {
+		restoredCount++
+		return true
+	})
+	if restoredCount != 80 {
+		t.Errorf("expected 80 keys in set, got %d", restoredCount)
 	}
 	// Head should be 80 (mod 100).
 	if p.keyRingHead != 80 {
