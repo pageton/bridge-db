@@ -103,7 +103,7 @@ func TestDefaultMSSQLConfig(t *testing.T) {
 func TestMergeMSSQL(t *testing.T) {
 	base := MSSQLConfig{Host: "h1", Port: 1433, Username: "u1"}
 	override := MSSQLConfig{Host: "h2", Database: "d2", Encrypt: true, TrustCert: true}
-	result := mergeMSSQL(base, override)
+	result := mergeStruct(base, override)
 	if result.Host != "h2" {
 		t.Errorf("host = %q", result.Host)
 	}

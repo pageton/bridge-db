@@ -140,7 +140,7 @@ func TestMySQLConfig_DSNWithPassword(t *testing.T) {
 func TestMergeMySQL(t *testing.T) {
 	base := MySQLConfig{Host: "h1", Port: 3306, Username: "u1"}
 	override := MySQLConfig{Host: "h2", Database: "d2"}
-	result := mergeMySQL(base, override)
+	result := mergeStruct(base, override)
 	if result.Host != "h2" {
 		t.Errorf("host = %q", result.Host)
 	}

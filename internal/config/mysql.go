@@ -130,3 +130,7 @@ func (c MySQLConfig) Validate() error {
 	}
 	return nil
 }
+
+func (c MySQLConfig) GetHost() string  { return c.Host }
+func (c MySQLConfig) GetPort() int     { return c.Port }
+func (c MySQLConfig) GetDatabase() string { return c.Database }

@@ -3,36 +3,18 @@ package config
 import (
 	"fmt"
 	"net"
+	"reflect"
 	"strconv"
 )
 
 // ProviderConfig returns the resolved provider-specific config struct.
 func ProviderConfig(cfg *ConnectionConfig) any {
-	switch cfg.Provider {
-	case "redis":
-		return cfg.Redis
-	case "mongodb":
-		return cfg.MongoDB
-	case "postgres":
-		return cfg.Postgres
-	case "mysql":
-		return cfg.MySQL
-	case "sqlite":
-		return cfg.SQLite
-	case "mariadb":
-		return cfg.MariaDB
-	case "cockroachdb":
-		return cfg.CockroachDB
-	case "mssql":
-		return cfg.MSSQL
-	default:
-		return nil
-	}
+	return cfg.Resolved()
 }
 
-// ProviderConfigWithTunnel returns the provider-specific config struct with the
+// ProviderConfigWithTunnel returns the resolved provider-specific config struct with the
 // host/port rewritten to the tunnel's local address while preserving all other
-// provider-specific fields.
+// provider-specific fields. SQLite configs are returned as-is (no host/port).
 func ProviderConfigWithTunnel(cfg *ConnectionConfig, tunnelAddr string) (any, error) {
 	if tunnelAddr == "" {
 		return ProviderConfig(cfg), nil
@@ -43,68 +25,38 @@ func ProviderConfigWithTunnel(cfg *ConnectionConfig, tunnelAddr string) (any, er
 		return nil, err
 	}
 
-	switch cfg.Provider {
-	case "redis":
-		if cfg.Redis == nil {
-			return nil, fmt.Errorf("missing redis config")
-		}
-		resolved := *cfg.Redis
-		resolved.Host = host
-		resolved.Port = port
-		return &resolved, nil
-	case "mongodb":
-		if cfg.MongoDB == nil {
-			return nil, fmt.Errorf("missing mongodb config")
-		}
-		resolved := *cfg.MongoDB
-		resolved.Host = host
-		resolved.Port = port
-		return &resolved, nil
-	case "postgres":
-		if cfg.Postgres == nil {
-			return nil, fmt.Errorf("missing postgres config")
-		}
-		resolved := *cfg.Postgres
-		resolved.Host = host
-		resolved.Port = port
-		return &resolved, nil
-	case "mysql":
-		if cfg.MySQL == nil {
-			return nil, fmt.Errorf("missing mysql config")
-		}
-		resolved := *cfg.MySQL
-		resolved.Host = host
-		resolved.Port = port
-		return &resolved, nil
-	case "sqlite":
+	// SQLite has no host/port — return as-is.
+	if cfg.Provider == "sqlite" {
 		return ProviderConfig(cfg), nil
-	case "mariadb":
-		if cfg.MariaDB == nil {
-			return nil, fmt.Errorf("missing mariadb config")
-		}
-		resolved := *cfg.MariaDB
-		resolved.Host = host
-		resolved.Port = port
-		return &resolved, nil
-	case "cockroachdb":
-		if cfg.CockroachDB == nil {
-			return nil, fmt.Errorf("missing cockroachdb config")
-		}
-		resolved := *cfg.CockroachDB
-		resolved.Host = host
-		resolved.Port = port
-		return &resolved, nil
-	case "mssql":
-		if cfg.MSSQL == nil {
-			return nil, fmt.Errorf("missing mssql config")
-		}
-		resolved := *cfg.MSSQL
-		resolved.Host = host
-		resolved.Port = port
-		return &resolved, nil
-	default:
-		return nil, fmt.Errorf("unknown provider %q", cfg.Provider)
 	}
+
+	rc := cfg.Resolved()
+	if rc == nil {
+		return nil, fmt.Errorf("missing %s config", cfg.Provider)
+	}
+
+	// All non-SQLite providers have Host (string) and Port (int) as their first
+	// two exported fields. Use reflection to clone the underlying struct and
+	// override those fields with the tunnel address.
+	rv := reflect.ValueOf(rc)
+	if rv.Kind() == reflect.Ptr {
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return rc, nil
+	}
+
+	clone := reflect.New(rv.Type()).Elem()
+	clone.Set(rv)
+
+	if h := clone.FieldByName("Host"); h.IsValid() && h.Kind() == reflect.String {
+		h.SetString(host)
+	}
+	if p := clone.FieldByName("Port"); p.IsValid() && p.Kind() == reflect.Int {
+		p.SetInt(int64(port))
+	}
+
+	return clone.Addr().Interface(), nil
 }
 
 func splitTunnelAddr(addr string) (string, int, error) {

@@ -129,3 +129,7 @@ func (c MSSQLConfig) Validate() error {
 	}
 	return nil
 }
+
+func (c MSSQLConfig) GetHost() string  { return c.Host }
+func (c MSSQLConfig) GetPort() int     { return c.Port }
+func (c MSSQLConfig) GetDatabase() string { return c.Database }

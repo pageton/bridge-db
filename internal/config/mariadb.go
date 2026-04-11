@@ -116,3 +116,7 @@ func (c MariaDBConfig) Validate() error {
 	}
 	return nil
 }
+
+func (c MariaDBConfig) GetHost() string  { return c.Host }
+func (c MariaDBConfig) GetPort() int     { return c.Port }
+func (c MariaDBConfig) GetDatabase() string { return c.Database }

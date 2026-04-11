@@ -48,3 +48,7 @@ func (c SQLiteConfig) Validate() error {
 	}
 	return nil
 }
+
+func (c SQLiteConfig) GetHost() string  { return "" }
+func (c SQLiteConfig) GetPort() int     { return 0 }
+func (c SQLiteConfig) GetDatabase() string { return c.Path }

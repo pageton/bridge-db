@@ -87,7 +87,7 @@ func TestDefaultMongoDBConfig(t *testing.T) {
 func TestMergeMongoDB(t *testing.T) {
 	base := MongoDBConfig{Host: "h1", Port: 27017, AuthSource: "admin"}
 	override := MongoDBConfig{Host: "h2", Database: "d2", AuthSource: "custom"}
-	result := mergeMongoDB(base, override)
+	result := mergeStruct(base, override)
 	if result.Host != "h2" {
 		t.Errorf("host = %q", result.Host)
 	}

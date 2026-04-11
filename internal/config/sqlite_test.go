@@ -60,7 +60,7 @@ func TestDefaultSQLiteConfig(t *testing.T) {
 func TestMergeSQLite(t *testing.T) {
 	base := SQLiteConfig{Path: "old.db"}
 	override := SQLiteConfig{Path: "new.db"}
-	result := mergeSQLite(base, override)
+	result := mergeStruct(base, override)
 	if result.Path != "new.db" {
 		t.Errorf("path = %q", result.Path)
 	}
@@ -69,7 +69,7 @@ func TestMergeSQLite(t *testing.T) {
 func TestMergeSQLite_NoOverride(t *testing.T) {
 	base := SQLiteConfig{Path: "old.db"}
 	override := SQLiteConfig{}
-	result := mergeSQLite(base, override)
+	result := mergeStruct(base, override)
 	if result.Path != "old.db" {
 		t.Errorf("path = %q, want old.db when override empty", result.Path)
 	}

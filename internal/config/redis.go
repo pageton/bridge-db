@@ -88,3 +88,7 @@ func (c RedisConfig) Validate() error {
 	}
 	return nil
 }
+
+func (c RedisConfig) GetHost() string  { return c.Host }
+func (c RedisConfig) GetPort() int     { return c.Port }
+func (c RedisConfig) GetDatabase() string { return fmt.Sprintf("%d", c.DB) }

@@ -128,3 +128,7 @@ func (c PostgresConfig) Validate() error {
 	}
 	return nil
 }
+
+func (c PostgresConfig) GetHost() string  { return c.Host }
+func (c PostgresConfig) GetPort() int     { return c.Port }
+func (c PostgresConfig) GetDatabase() string { return c.Database }

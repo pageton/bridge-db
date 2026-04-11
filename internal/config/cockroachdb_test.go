@@ -89,7 +89,7 @@ func TestDefaultCockroachDBConfig(t *testing.T) {
 func TestMergeCockroachDB(t *testing.T) {
 	base := CockroachDBConfig{Host: "h1", Port: 26257, SSLMode: "prefer"}
 	override := CockroachDBConfig{Host: "h2", Database: "d2", SSLMode: "require"}
-	result := mergeCockroachDB(base, override)
+	result := mergeStruct(base, override)
 	if result.Host != "h2" {
 		t.Errorf("host = %q", result.Host)
 	}

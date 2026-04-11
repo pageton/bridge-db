@@ -89,7 +89,7 @@ func TestRedisConfig_Address(t *testing.T) {
 func TestMergeRedis_Overrides(t *testing.T) {
 	base := RedisConfig{Host: "h1", Port: 6379, Username: "u1", Password: "p1", DB: 0}
 	override := RedisConfig{Host: "h2", Port: 6380, DB: 5, TLS: true}
-	result := mergeRedis(base, override)
+	result := mergeStruct(base, override)
 	if result.Host != "h2" {
 		t.Errorf("host = %q, want h2", result.Host)
 	}

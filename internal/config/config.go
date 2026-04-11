@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/pageton/bridge-db/internal/tunnel"
@@ -97,340 +98,166 @@ func (c *ConnectionConfig) Resolve() error {
 	}
 }
 
+// ResolvedConfig is implemented by each provider-specific config type.
+// It provides uniform access to connection parameters for tunnel setup,
+// config hashing, and logging.
+type ResolvedConfig interface {
+	GetHost() string
+	GetPort() int
+	GetDatabase() string
+}
+
+// Resolved returns the active provider config as a ResolvedConfig interface.
+// Returns nil if no provider config is set.
+func (c *ConnectionConfig) Resolved() ResolvedConfig {
+	switch c.Provider {
+	case "redis":
+		return c.Redis
+	case "mongodb":
+		return c.MongoDB
+	case "postgres":
+		return c.Postgres
+	case "mysql":
+		return c.MySQL
+	case "mariadb":
+		return c.MariaDB
+	case "cockroachdb":
+		return c.CockroachDB
+	case "mssql":
+		return c.MSSQL
+	case "sqlite":
+		return c.SQLite
+	}
+	return nil
+}
+
 func (c *ConnectionConfig) resolveRedis() error {
-	var cfg RedisConfig
-	if c.URL != "" {
-		parsed, err := ParseRedisURL(c.URL)
-		if err != nil {
-			return fmt.Errorf("redis URL: %w", err)
-		}
-		cfg = parsed
-	} else {
-		cfg = DefaultRedisConfig()
-	}
-	if c.Redis != nil {
-		cfg = mergeRedis(cfg, *c.Redis)
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := resolve(c.URL, "redis", ParseRedisURL, DefaultRedisConfig, c.Redis)
+	if err != nil {
 		return err
 	}
-	c.Redis = &cfg
+	c.Redis = cfg
 	return nil
 }
 
 func (c *ConnectionConfig) resolveMongoDB() error {
-	var cfg MongoDBConfig
-	if c.URL != "" {
-		parsed, err := ParseMongoDBURL(c.URL)
-		if err != nil {
-			return fmt.Errorf("mongodb URL: %w", err)
-		}
-		cfg = parsed
-	} else {
-		cfg = DefaultMongoDBConfig()
-	}
-	if c.MongoDB != nil {
-		cfg = mergeMongoDB(cfg, *c.MongoDB)
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := resolve(c.URL, "mongodb", ParseMongoDBURL, DefaultMongoDBConfig, c.MongoDB)
+	if err != nil {
 		return err
 	}
-	c.MongoDB = &cfg
+	c.MongoDB = cfg
 	return nil
 }
 
 func (c *ConnectionConfig) resolvePostgres() error {
-	var cfg PostgresConfig
-	if c.URL != "" {
-		parsed, err := ParsePostgresURL(c.URL)
-		if err != nil {
-			return fmt.Errorf("postgres URL: %w", err)
-		}
-		cfg = parsed
-	} else {
-		cfg = DefaultPostgresConfig()
-	}
-	if c.Postgres != nil {
-		cfg = mergePostgres(cfg, *c.Postgres)
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := resolve(c.URL, "postgres", ParsePostgresURL, DefaultPostgresConfig, c.Postgres)
+	if err != nil {
 		return err
 	}
-	c.Postgres = &cfg
+	c.Postgres = cfg
 	return nil
 }
 
 func (c *ConnectionConfig) resolveMySQL() error {
-	var cfg MySQLConfig
-	if c.URL != "" {
-		parsed, err := ParseMySQLURL(c.URL)
-		if err != nil {
-			return fmt.Errorf("mysql URL: %w", err)
-		}
-		cfg = parsed
-	} else {
-		cfg = DefaultMySQLConfig()
-	}
-	if c.MySQL != nil {
-		cfg = mergeMySQL(cfg, *c.MySQL)
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := resolve(c.URL, "mysql", ParseMySQLURL, DefaultMySQLConfig, c.MySQL)
+	if err != nil {
 		return err
 	}
-	c.MySQL = &cfg
+	c.MySQL = cfg
 	return nil
 }
 
 func (c *ConnectionConfig) resolveSQLite() error {
-	var cfg SQLiteConfig
-	if c.URL != "" {
-		parsed, err := ParseSQLiteURL(c.URL)
-		if err != nil {
-			return fmt.Errorf("sqlite URL: %w", err)
-		}
-		cfg = parsed
-	} else {
-		cfg = DefaultSQLiteConfig()
-	}
-	if c.SQLite != nil {
-		cfg = mergeSQLite(cfg, *c.SQLite)
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := resolve(c.URL, "sqlite", ParseSQLiteURL, DefaultSQLiteConfig, c.SQLite)
+	if err != nil {
 		return err
 	}
-	c.SQLite = &cfg
+	c.SQLite = cfg
 	return nil
 }
 
 func (c *ConnectionConfig) resolveMariaDB() error {
-	var cfg MariaDBConfig
-	if c.URL != "" {
-		parsed, err := ParseMariaDBURL(c.URL)
-		if err != nil {
-			return fmt.Errorf("mariadb URL: %w", err)
-		}
-		cfg = parsed
-	} else {
-		cfg = DefaultMariaDBConfig()
-	}
-	if c.MariaDB != nil {
-		cfg = mergeMariaDB(cfg, *c.MariaDB)
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := resolve(c.URL, "mariadb", ParseMariaDBURL, DefaultMariaDBConfig, c.MariaDB)
+	if err != nil {
 		return err
 	}
-	c.MariaDB = &cfg
+	c.MariaDB = cfg
 	return nil
 }
 
 func (c *ConnectionConfig) resolveCockroachDB() error {
-	var cfg CockroachDBConfig
-	if c.URL != "" {
-		parsed, err := ParseCockroachDBURL(c.URL)
-		if err != nil {
-			return fmt.Errorf("cockroachdb URL: %w", err)
-		}
-		cfg = parsed
-	} else {
-		cfg = DefaultCockroachDBConfig()
-	}
-	if c.CockroachDB != nil {
-		cfg = mergeCockroachDB(cfg, *c.CockroachDB)
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := resolve(c.URL, "cockroachdb", ParseCockroachDBURL, DefaultCockroachDBConfig, c.CockroachDB)
+	if err != nil {
 		return err
 	}
-	c.CockroachDB = &cfg
+	c.CockroachDB = cfg
 	return nil
 }
 
 func (c *ConnectionConfig) resolveMSSQL() error {
-	var cfg MSSQLConfig
-	if c.URL != "" {
-		parsed, err := ParseMSSQLURL(c.URL)
-		if err != nil {
-			return fmt.Errorf("mssql URL: %w", err)
-		}
-		cfg = parsed
-	} else {
-		cfg = DefaultMSSQLConfig()
-	}
-	if c.MSSQL != nil {
-		cfg = mergeMSSQL(cfg, *c.MSSQL)
-	}
-	if err := cfg.Validate(); err != nil {
+	cfg, err := resolve(c.URL, "mssql", ParseMSSQLURL, DefaultMSSQLConfig, c.MSSQL)
+	if err != nil {
 		return err
 	}
-	c.MSSQL = &cfg
+	c.MSSQL = cfg
 	return nil
 }
 
 // ---------------------------------------------------------------------------
-// Merge helpers (override non-zero fields from override into base)
+// Merge helper: override non-zero fields from src into dst.
+// Works for any struct whose fields are string, int, or bool.
 // ---------------------------------------------------------------------------
 
-func mergeRedis(base, override RedisConfig) RedisConfig {
-	if override.Host != "" {
-		base.Host = override.Host
+// mergeStruct copies every non-zero field from src into dst and returns the
+// result. It uses reflection so that adding a new config field requires no
+// additional merge logic — the zero-value check ("" for strings, 0 for ints,
+// false for bools) naturally matches the "only override when explicitly set"
+// semantics.
+func mergeStruct[T any](dst, src T) T {
+	dstVal := reflect.ValueOf(&dst).Elem()
+	srcVal := reflect.ValueOf(&src).Elem()
+	for i := range srcVal.NumField() {
+		sf := srcVal.Field(i)
+		if !sf.IsZero() {
+			dstVal.Field(i).Set(sf)
+		}
 	}
-	if override.Port != 0 {
-		base.Port = override.Port
-	}
-	if override.Username != "" {
-		base.Username = override.Username
-	}
-	if override.Password != "" {
-		base.Password = override.Password
-	}
-	if override.DB != 0 {
-		base.DB = override.DB
-	}
-	if override.TLS {
-		base.TLS = true
-	}
-	return base
+	return dst
 }
 
-func mergeMongoDB(base, override MongoDBConfig) MongoDBConfig {
-	if override.Host != "" {
-		base.Host = override.Host
+// resolve parses a URL (if set) into a provider-specific config, merges any
+// user overrides, validates, and stores the result. This generic helper
+// eliminates the repetitive resolve-pattern duplicated across 8 providers.
+//
+// Parameters:
+//   - url: raw connection URL (may be empty)
+//   - name: provider name, used only in error messages
+//   - parse: URL parser function (e.g. ParseRedisURL)
+//   - defaults: default config function (e.g. DefaultRedisConfig)
+//   - override: user-supplied override (may be nil)
+//
+// Returns the resolved config pointer or an error.
+func resolve[T any](url, name string, parse func(string) (T, error), defaults func() T, override *T) (*T, error) {
+	var cfg T
+	if url != "" {
+		parsed, err := parse(url)
+		if err != nil {
+			return nil, fmt.Errorf("%s URL: %w", name, err)
+		}
+		cfg = parsed
+	} else {
+		cfg = defaults()
 	}
-	if override.Port != 0 {
-		base.Port = override.Port
+	if override != nil {
+		cfg = mergeStruct(cfg, *override)
 	}
-	if override.Username != "" {
-		base.Username = override.Username
+	// Validate via interface — all config types implement Validator.
+	if v, ok := any(cfg).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return nil, err
+		}
 	}
-	if override.Password != "" {
-		base.Password = override.Password
-	}
-	if override.Database != "" {
-		base.Database = override.Database
-	}
-	if override.AuthSource != "" {
-		base.AuthSource = override.AuthSource
-	}
-	if override.TLS {
-		base.TLS = true
-	}
-	return base
-}
-
-func mergePostgres(base, override PostgresConfig) PostgresConfig {
-	if override.Host != "" {
-		base.Host = override.Host
-	}
-	if override.Port != 0 {
-		base.Port = override.Port
-	}
-	if override.Username != "" {
-		base.Username = override.Username
-	}
-	if override.Password != "" {
-		base.Password = override.Password
-	}
-	if override.Database != "" {
-		base.Database = override.Database
-	}
-	if override.SSLMode != "" {
-		base.SSLMode = override.SSLMode
-	}
-	return base
-}
-
-func mergeMySQL(base, override MySQLConfig) MySQLConfig {
-	if override.Host != "" {
-		base.Host = override.Host
-	}
-	if override.Port != 0 {
-		base.Port = override.Port
-	}
-	if override.Username != "" {
-		base.Username = override.Username
-	}
-	if override.Password != "" {
-		base.Password = override.Password
-	}
-	if override.Database != "" {
-		base.Database = override.Database
-	}
-	return base
-}
-
-func mergeSQLite(base, override SQLiteConfig) SQLiteConfig {
-	if override.Path != "" {
-		base.Path = override.Path
-	}
-	return base
-}
-
-func mergeMariaDB(base, override MariaDBConfig) MariaDBConfig {
-	if override.Host != "" {
-		base.Host = override.Host
-	}
-	if override.Port != 0 {
-		base.Port = override.Port
-	}
-	if override.Username != "" {
-		base.Username = override.Username
-	}
-	if override.Password != "" {
-		base.Password = override.Password
-	}
-	if override.Database != "" {
-		base.Database = override.Database
-	}
-	return base
-}
-
-func mergeCockroachDB(base, override CockroachDBConfig) CockroachDBConfig {
-	if override.Host != "" {
-		base.Host = override.Host
-	}
-	if override.Port != 0 {
-		base.Port = override.Port
-	}
-	if override.Username != "" {
-		base.Username = override.Username
-	}
-	if override.Password != "" {
-		base.Password = override.Password
-	}
-	if override.Database != "" {
-		base.Database = override.Database
-	}
-	if override.SSLMode != "" {
-		base.SSLMode = override.SSLMode
-	}
-	return base
-}
-
-func mergeMSSQL(base, override MSSQLConfig) MSSQLConfig {
-	if override.Host != "" {
-		base.Host = override.Host
-	}
-	if override.Port != 0 {
-		base.Port = override.Port
-	}
-	if override.Username != "" {
-		base.Username = override.Username
-	}
-	if override.Password != "" {
-		base.Password = override.Password
-	}
-	if override.Database != "" {
-		base.Database = override.Database
-	}
-	if override.Instance != "" {
-		base.Instance = override.Instance
-	}
-	if override.Encrypt {
-		base.Encrypt = true
-	}
-	if override.TrustCert {
-		base.TrustCert = true
-	}
-	return base
+	return &cfg, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +368,7 @@ type TransformConfig struct {
 func DefaultTransformConfig() TransformConfig {
 	return TransformConfig{
 		NullPolicy: "passthrough",
+		Mappings:   map[string][]FieldMapping{},
 	}
 }
 

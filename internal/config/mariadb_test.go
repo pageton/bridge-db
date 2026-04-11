@@ -98,7 +98,7 @@ func TestMariaDBConfig_DSNWithPassword(t *testing.T) {
 func TestMergeMariaDB(t *testing.T) {
 	base := MariaDBConfig{Host: "h1", Port: 3306}
 	override := MariaDBConfig{Host: "h2", Database: "d2"}
-	result := mergeMariaDB(base, override)
+	result := mergeStruct(base, override)
 	if result.Host != "h2" {
 		t.Errorf("host = %q", result.Host)
 	}

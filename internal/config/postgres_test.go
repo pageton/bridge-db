@@ -113,7 +113,7 @@ func TestParsePostgresURL_QueryParams(t *testing.T) {
 func TestMergePostgres(t *testing.T) {
 	base := PostgresConfig{Host: "h1", Port: 5432, Username: "u1", SSLMode: "prefer"}
 	override := PostgresConfig{Host: "h2", SSLMode: "require"}
-	result := mergePostgres(base, override)
+	result := mergeStruct(base, override)
 	if result.Host != "h2" {
 		t.Errorf("host = %q", result.Host)
 	}
