@@ -127,20 +127,17 @@ func (s *RunStatusService) Update(runID string, fn func(*MigrationRun)) error {
 }
 
 func (s *RunStatusService) Get(runID string) (*MigrationRun, error) {
-	s.mu.RLock()
-	run, ok := s.runs[runID]
-	s.mu.RUnlock()
-	if ok {
-		return run.clone(), nil
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	loaded, err := s.loadLocked(runID)
-	if err != nil {
-		return nil, err
+	run, ok := s.runs[runID]
+	if !ok {
+		loaded, err := s.loadLocked(runID)
+		if err != nil {
+			return nil, err
+		}
+		return loaded.clone(), nil
 	}
-	return loaded.clone(), nil
+	return run.clone(), nil
 }
 
 func (s *RunStatusService) Wait(runID string, ctx context.Context) (*MigrationRun, error) {
