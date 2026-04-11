@@ -243,7 +243,9 @@ func (w *mssqlWriter) execChunkedMerge(ctx context.Context, tx *sql.Tx, table st
 			strings.Join(srcCols, ", "),
 		)
 	}
-	var executor interface{ ExecContext(context.Context, string, ...any) (sql.Result, error) }
+	var executor interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	}
 	if tx != nil {
 		executor = tx
 	} else {
@@ -336,7 +338,9 @@ func (w *mssqlWriter) execChunkedInsertSkip(ctx context.Context, tx *sql.Tx, tab
 		strings.Join(srcCols, ", "),
 	)
 
-	var executor interface{ ExecContext(context.Context, string, ...any) (sql.Result, error) }
+	var executor interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	}
 	if tx != nil {
 		executor = tx
 	} else {

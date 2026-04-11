@@ -249,7 +249,7 @@ func TestProcessWriteOutcome_RecordsMetrics(t *testing.T) {
 	w := &trackingWriter{}
 	bw := &batchWriter{w: w, cfg: writeConfig{MaxPerUnitRetry: 0}}
 	p := &Pipeline{
-		opts:          PipelineOptions{MaxWrittenKeys: 1024},
+		opts:     PipelineOptions{MaxWrittenKeys: 1024},
 		keyRing:  make([]string, 1024),
 		tableSet: make(map[string]bool),
 	}

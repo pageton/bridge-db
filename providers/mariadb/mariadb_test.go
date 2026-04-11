@@ -100,7 +100,7 @@ func TestFormatPrimaryKey_SingleColumn(t *testing.T) {
 
 func TestFormatPrimaryKey_Composite(t *testing.T) {
 	pk := map[string]any{
-		"org_id": int64(1),
+		"org_id":  int64(1),
 		"user_id": int64(2),
 	}
 	got := formatPrimaryKey(pk)

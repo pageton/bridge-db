@@ -25,14 +25,14 @@ type ConfigTemplateSummary struct {
 
 // ConfigTemplateDetail is the full config template content plus metadata.
 type ConfigTemplateDetail struct {
-	Name            string               `json:"name"`
-	SourceProvider  string               `json:"source_provider"`
-	DestProvider    string               `json:"dest_provider"`
-	Description     string               `json:"description"`
-	Path            string               `json:"path"`
-	CrossDB         bool                 `json:"cross_db"`
-	SchemaMigration bool                 `json:"schema_migration"`
-	Raw             string               `json:"raw"`
+	Name            string                  `json:"name"`
+	SourceProvider  string                  `json:"source_provider"`
+	DestProvider    string                  `json:"dest_provider"`
+	Description     string                  `json:"description"`
+	Path            string                  `json:"path"`
+	CrossDB         bool                    `json:"cross_db"`
+	SchemaMigration bool                    `json:"schema_migration"`
+	Raw             string                  `json:"raw"`
 	Config          *config.MigrationConfig `json:"config"`
 }
 

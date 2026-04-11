@@ -110,6 +110,6 @@ func (c CockroachDBConfig) Validate() error {
 	return nil
 }
 
-func (c CockroachDBConfig) GetHost() string  { return c.Host }
-func (c CockroachDBConfig) GetPort() int     { return c.Port }
+func (c CockroachDBConfig) GetHost() string     { return c.Host }
+func (c CockroachDBConfig) GetPort() int        { return c.Port }
 func (c CockroachDBConfig) GetDatabase() string { return c.Database }

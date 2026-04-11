@@ -94,6 +94,6 @@ func (c MongoDBConfig) Validate() error {
 	return nil
 }
 
-func (c MongoDBConfig) GetHost() string  { return c.Host }
-func (c MongoDBConfig) GetPort() int     { return c.Port }
+func (c MongoDBConfig) GetHost() string     { return c.Host }
+func (c MongoDBConfig) GetPort() int        { return c.Port }
 func (c MongoDBConfig) GetDatabase() string { return c.Database }

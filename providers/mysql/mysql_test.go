@@ -66,14 +66,14 @@ func TestEncodeMySQLRow_RoundTripPreservesAllFields(t *testing.T) {
 	original := &mysqlRow{
 		Table: "orders",
 		PrimaryKey: map[string]any{
-			"order_id":  1001,
+			"order_id": 1001,
 			"customer": "bob",
 		},
 		Data: map[string]any{
-			"order_id":  1001,
+			"order_id": 1001,
 			"customer": "bob",
-			"total":     99.50,
-			"active":    true,
+			"total":    99.50,
+			"active":   true,
 		},
 		ColumnTypes: map[string]string{
 			"order_id": "int",
@@ -146,7 +146,7 @@ func TestFormatPrimaryKey_SingleColumnString(t *testing.T) {
 
 func TestFormatPrimaryKey_Composite(t *testing.T) {
 	pk := map[string]any{
-		"order_id":  1001,
+		"order_id": 1001,
 		"customer": "bob",
 	}
 	got := formatPrimaryKey(pk)
