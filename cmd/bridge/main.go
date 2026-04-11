@@ -6,7 +6,14 @@ import (
 	"github.com/pageton/bridge-db/internal/cli"
 )
 
-var version = "0.1.2"
+// Build-time variables injected via ldflags (see Makefile/justfile).
+//
+//nolint:govet // set via -ldflags at build time
+var (
+	version   = "dev"
+	commit    string //nolint:unused
+	buildTime string //nolint:unused
+)
 
 func main() {
 	cli.SetVersion(version)
