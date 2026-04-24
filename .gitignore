@@ -20,3 +20,6 @@ docs/logo.png
 bridge.test
 *.test
 bridge.old
+bridge.log
+bench
+/bench
