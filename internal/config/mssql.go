@@ -8,41 +8,41 @@ import (
 
 type MSSQLConfig struct {
 	Host      string `yaml:"host" json:"host"`
-	Port      int    `yaml:"port" json:"port"`
+	Port      *int   `yaml:"port" json:"port"`
 	Username  string `yaml:"username" json:"username"`
 	Password  string `yaml:"password" json:"password"`
 	Database  string `yaml:"database" json:"database"`
 	Instance  string `yaml:"instance" json:"instance"`
-	Encrypt   bool   `yaml:"encrypt" json:"encrypt"`
-	TrustCert bool   `yaml:"trust_cert" json:"trust_cert"`
+	Encrypt   *bool  `yaml:"encrypt" json:"encrypt"`
+	TrustCert *bool  `yaml:"trust_cert" json:"trust_cert"`
 }
 
 func DefaultMSSQLConfig() MSSQLConfig {
 	return MSSQLConfig{
 		Host:      "127.0.0.1",
-		Port:      1433,
+		Port:      IntPtr(1433),
 		Username:  "sa",
-		Encrypt:   true,
-		TrustCert: false,
+		Encrypt:   BoolPtr(true),
+		TrustCert: BoolPtr(false),
 	}
 }
 
 func (c MSSQLConfig) Address() string {
-	return fmt.Sprintf("%s:%d", c.Host, c.Port)
+	return fmt.Sprintf("%s:%d", c.Host, c.GetPort())
 }
 
 // DSN returns a masked MSSQL connection string (password replaced with ***).
 func (c MSSQLConfig) DSN() string {
 	dsn := fmt.Sprintf("sqlserver://%s@%s:%d",
 		url.UserPassword(c.Username, "***").String(),
-		c.Host, c.Port)
+		c.Host, c.GetPort())
 	if c.Database != "" {
 		dsn += "?database=" + url.QueryEscape(c.Database)
 	}
-	if c.Encrypt {
+	if c.GetEncrypt() {
 		dsn += "&encrypt=true"
 	}
-	if c.TrustCert {
+	if c.GetTrustCert() {
 		dsn += "&TrustServerCertificate=true"
 	}
 	return dsn
@@ -52,14 +52,14 @@ func (c MSSQLConfig) DSN() string {
 func (c MSSQLConfig) DSNWithPassword() string {
 	dsn := fmt.Sprintf("sqlserver://%s@%s:%d",
 		url.UserPassword(c.Username, c.Password).String(),
-		c.Host, c.Port)
+		c.Host, c.GetPort())
 	if c.Database != "" {
 		dsn += "?database=" + url.QueryEscape(c.Database)
 	}
-	if c.Encrypt {
+	if c.GetEncrypt() {
 		dsn += "&encrypt=true"
 	}
-	if c.TrustCert {
+	if c.GetTrustCert() {
 		dsn += "&TrustServerCertificate=true"
 	}
 	return dsn
@@ -79,10 +79,16 @@ func ParseMSSQLURL(rawURL string) (MSSQLConfig, error) {
 
 	q := u.Query()
 	if enc := q.Get("encrypt"); enc == "true" || enc == "1" {
-		cfg.Encrypt = true
+		cfg.Encrypt = BoolPtr(true)
+	}
+	if enc := q.Get("encrypt"); enc == "false" || enc == "0" {
+		cfg.Encrypt = BoolPtr(false)
 	}
 	if tc := q.Get("TrustServerCertificate"); tc == "true" || tc == "1" {
-		cfg.TrustCert = true
+		cfg.TrustCert = BoolPtr(true)
+	}
+	if tc := q.Get("TrustServerCertificate"); tc == "false" || tc == "0" {
+		cfg.TrustCert = BoolPtr(false)
 	}
 	if inst := q.Get("instance"); inst != "" {
 		cfg.Instance = inst
@@ -95,7 +101,7 @@ func ParseMSSQLURL(rawURL string) (MSSQLConfig, error) {
 		}
 		if portStr := u.Port(); portStr != "" {
 			if p, err := strconv.Atoi(portStr); err == nil {
-				cfg.Port = p
+				cfg.Port = IntPtr(p)
 			}
 		}
 	}
@@ -121,7 +127,7 @@ func (c MSSQLConfig) Validate() error {
 	if c.Host == "" {
 		return fmt.Errorf("mssql host is required")
 	}
-	if c.Port <= 0 || c.Port > 65535 {
+	if c.GetPort() <= 0 || c.GetPort() > 65535 {
 		return fmt.Errorf("mssql port must be between 1 and 65535")
 	}
 	if c.Database == "" {
@@ -130,6 +136,23 @@ func (c MSSQLConfig) Validate() error {
 	return nil
 }
 
-func (c MSSQLConfig) GetHost() string     { return c.Host }
-func (c MSSQLConfig) GetPort() int        { return c.Port }
+func (c MSSQLConfig) GetHost() string { return c.Host }
+func (c MSSQLConfig) GetPort() int {
+	if c.Port == nil {
+		return 0
+	}
+	return *c.Port
+}
+func (c MSSQLConfig) GetEncrypt() bool {
+	if c.Encrypt == nil {
+		return false
+	}
+	return *c.Encrypt
+}
+func (c MSSQLConfig) GetTrustCert() bool {
+	if c.TrustCert == nil {
+		return false
+	}
+	return *c.TrustCert
+}
 func (c MSSQLConfig) GetDatabase() string { return c.Database }

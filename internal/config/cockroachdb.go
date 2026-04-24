@@ -8,7 +8,7 @@ import (
 
 type CockroachDBConfig struct {
 	Host     string `yaml:"host" json:"host"`
-	Port     int    `yaml:"port" json:"port"`
+	Port     *int   `yaml:"port" json:"port"`
 	Username string `yaml:"username" json:"username"`
 	Password string `yaml:"password" json:"password"`
 	Database string `yaml:"database" json:"database"`
@@ -18,14 +18,14 @@ type CockroachDBConfig struct {
 func DefaultCockroachDBConfig() CockroachDBConfig {
 	return CockroachDBConfig{
 		Host:     "127.0.0.1",
-		Port:     26257,
+		Port:     IntPtr(26257),
 		Username: "root",
 		SSLMode:  "require",
 	}
 }
 
 func (c CockroachDBConfig) Address() string {
-	return fmt.Sprintf("%s:%d", c.Host, c.Port)
+	return fmt.Sprintf("%s:%d", c.Host, c.GetPort())
 }
 
 func (c CockroachDBConfig) DSN() string {
@@ -34,7 +34,7 @@ func (c CockroachDBConfig) DSN() string {
 			c.Host, c.Username, c.Database, c.SSLMode)
 	}
 	return fmt.Sprintf("host=%s port=%d user=%s password=xxxxx dbname=%s sslmode=%s",
-		c.Host, c.Port, c.Username, c.Database, c.SSLMode)
+		c.Host, c.GetPort(), c.Username, c.Database, c.SSLMode)
 }
 
 func (c CockroachDBConfig) DSNWithPassword() string {
@@ -43,7 +43,7 @@ func (c CockroachDBConfig) DSNWithPassword() string {
 			c.Host, c.Username, c.Password, c.Database, c.SSLMode)
 	}
 	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		c.Host, c.Port, c.Username, c.Password, c.Database, c.SSLMode)
+		c.Host, c.GetPort(), c.Username, c.Password, c.Database, c.SSLMode)
 }
 
 func ParseCockroachDBURL(rawURL string) (CockroachDBConfig, error) {
@@ -73,7 +73,7 @@ func ParseCockroachDBURL(rawURL string) (CockroachDBConfig, error) {
 		}
 		if portStr := u.Port(); portStr != "" {
 			if p, err := strconv.Atoi(portStr); err == nil {
-				cfg.Port = p
+				cfg.Port = IntPtr(p)
 			}
 		}
 	}
@@ -100,7 +100,7 @@ func (c CockroachDBConfig) Validate() error {
 		return fmt.Errorf("cockroachdb host is required")
 	}
 	if len(c.Host) > 0 && c.Host[0] != '/' {
-		if c.Port <= 0 || c.Port > 65535 {
+		if c.GetPort() <= 0 || c.GetPort() > 65535 {
 			return fmt.Errorf("cockroachdb port must be between 1 and 65535")
 		}
 	}
@@ -110,6 +110,11 @@ func (c CockroachDBConfig) Validate() error {
 	return nil
 }
 
-func (c CockroachDBConfig) GetHost() string     { return c.Host }
-func (c CockroachDBConfig) GetPort() int        { return c.Port }
+func (c CockroachDBConfig) GetHost() string { return c.Host }
+func (c CockroachDBConfig) GetPort() int {
+	if c.Port == nil {
+		return 0
+	}
+	return *c.Port
+}
 func (c CockroachDBConfig) GetDatabase() string { return c.Database }

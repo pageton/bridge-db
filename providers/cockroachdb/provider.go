@@ -258,7 +258,7 @@ func cockroachDBConfigFromMap(m map[string]string) (*config.CockroachDBConfig, e
 
 	cfg := config.DefaultCockroachDBConfig()
 	cfg.Host = host
-	cfg.Port = port
+	cfg.Port = config.IntPtr(port)
 
 	if db := m["database"]; db != "" {
 		cfg.Database = db
@@ -271,7 +271,7 @@ func cockroachDBConfigFromMap(m map[string]string) (*config.CockroachDBConfig, e
 }
 
 func buildCockroachDBConnStr(cfg *config.CockroachDBConfig) string {
-	connStr := fmt.Sprintf("host=%s port=%d", cfg.Host, cfg.Port)
+	connStr := fmt.Sprintf("host=%s port=%d", cfg.Host, cfg.GetPort())
 
 	if cfg.Database != "" {
 		connStr += fmt.Sprintf(" dbname=%s", cfg.Database)

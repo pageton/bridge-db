@@ -22,9 +22,11 @@ type CrossVerifier struct {
 }
 
 // NewCrossVerifier creates a new cross-verifier.
-func NewCrossVerifier(src, dst provider.Provider, opts Options) *CrossVerifier {
+// Returns an error if opts fails validation, so the caller gets an explicit
+// signal instead of silent fallback to defaults.
+func NewCrossVerifier(src, dst provider.Provider, opts Options) (*CrossVerifier, error) {
 	if err := opts.Validate(); err != nil {
-		opts = DefaultOptions()
+		return nil, fmt.Errorf("invalid verification options: %w", err)
 	}
 	return &CrossVerifier{
 		src:     src,
@@ -32,7 +34,7 @@ func NewCrossVerifier(src, dst provider.Provider, opts Options) *CrossVerifier {
 		srcName: src.Name(),
 		dstName: dst.Name(),
 		opts:    opts,
-	}
+	}, nil
 }
 
 // Verify runs all enabled verification phases and returns a report.
@@ -100,8 +102,8 @@ func (cv *CrossVerifier) Verify(ctx context.Context) (*VerificationReport, error
 	// Finalize.
 	report.Duration = time.Since(start)
 	report.sortTables()
-	report.computeStatus()
 	cv.aggregateStats(report)
+	report.computeStatus()
 
 	cv.logResult(report)
 	return report, nil

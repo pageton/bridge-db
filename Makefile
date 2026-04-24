@@ -1,4 +1,4 @@
-.PHONY: build clean test lint fmt vet install run fmt-check check ci build-all build-base test-ci test-ci-race
+.PHONY: build clean test lint fmt vet install run fmt-check check ci build-all build-base test-ci test-ci-race benchmark benchmark-small benchmark-all benchmark-large benchmark-resume
 
 # Binary settings
 BINARY_NAME  := bridge
@@ -79,10 +79,10 @@ lint:
 # Testing
 # -------------------------------------------------------
 
-test:
+test: fmt-check
 	$(GOTEST) $(BUILD_TAGS) ./...
 
-test-ci:
+test-ci: fmt-check
 	$(GOTEST) -v -count=1 -race $(BUILD_TAGS) $(RACE_PKGS)
 	$(GOTEST) -v -count=1 $(BUILD_TAGS) $(NO_RACE_PKGS)
 
@@ -125,3 +125,22 @@ check: build fmt-check vet lint test
 ci: fmt-check lint test-ci
 
 all: clean build check
+
+# -------------------------------------------------------
+# Benchmarking
+# -------------------------------------------------------
+
+benchmark:
+	@$(MAKE) benchmark-small
+
+benchmark-small:
+	$(GOCMD) run -tags sqlite ./cmd/bench -sizes small -output docs/benchmark-results.md
+
+benchmark-all:
+	$(GOCMD) run -tags sqlite ./cmd/bench -sizes small,medium -batch-sizes 500,1000,5000 -workers 1,2,4 -verify -runs 1 -output docs/benchmark-results.md
+
+benchmark-large:
+	$(GOCMD) run -tags sqlite ./cmd/bench -sizes large -batch-sizes 500,1000,5000 -workers 1,2,4,8 -verify -runs 1 -output docs/benchmark-results.md -json docs/benchmark-results.json
+
+benchmark-resume:
+	$(GOCMD) run -tags sqlite ./cmd/bench -sizes small,medium -resume -output docs/benchmark-results.md

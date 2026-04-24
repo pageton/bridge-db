@@ -11,6 +11,9 @@ linters:
     - staticcheck
     - unused
     - ineffassign
+  exclusions:
+    paths:
+      - cmd/bench
 
 issues:
   max-issues-per-linter: 50

@@ -576,7 +576,7 @@ func TestCrdbSafeDefault_UnknownFunctionRejected(t *testing.T) {
 func TestBuildCockroachDBConnStr_Basic(t *testing.T) {
 	cfg := &config.CockroachDBConfig{
 		Host:     "localhost",
-		Port:     26257,
+		Port:     config.IntPtr(26257),
 		Database: "mydb",
 		SSLMode:  "disable",
 	}
@@ -598,7 +598,7 @@ func TestBuildCockroachDBConnStr_Basic(t *testing.T) {
 func TestBuildCockroachDBConnStr_WithAuth(t *testing.T) {
 	cfg := &config.CockroachDBConfig{
 		Host:     "10.0.0.1",
-		Port:     26257,
+		Port:     config.IntPtr(26257),
 		Database: "prod",
 		Username: "admin",
 		Password: "secret",
@@ -616,7 +616,7 @@ func TestBuildCockroachDBConnStr_WithAuth(t *testing.T) {
 func TestBuildCockroachDBConnStr_Minimal(t *testing.T) {
 	cfg := &config.CockroachDBConfig{
 		Host: "localhost",
-		Port: 26257,
+		Port: config.IntPtr(26257),
 	}
 	got := buildCockroachDBConnStr(cfg)
 	if !strings.HasPrefix(got, "host=localhost port=26257") {

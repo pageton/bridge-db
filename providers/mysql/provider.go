@@ -336,7 +336,7 @@ func mysqlConfigFromMap(m map[string]string) (*config.MySQLConfig, error) {
 
 	cfg := config.DefaultMySQLConfig()
 	cfg.Host = host
-	cfg.Port = portStr
+	cfg.Port = config.IntPtr(portStr)
 
 	// Copy database name if provided
 	if db := m["database"]; db != "" {

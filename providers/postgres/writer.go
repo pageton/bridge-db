@@ -65,6 +65,7 @@ func (w *postgresWriter) Write(ctx context.Context, units []provider.MigrationUn
 			w.log.Debug("failed to decode row", "key", unit.Key, "error", err)
 			continue
 		}
+		row.Schema = normalizePostgresSchema(row.Schema)
 
 		tableKey := row.Schema + "." + row.Table
 		tableRows[tableKey] = append(tableRows[tableKey], *row)
@@ -77,6 +78,11 @@ func (w *postgresWriter) Write(ctx context.Context, units []provider.MigrationUn
 	for tableKey, rows := range tableRows {
 		if err := w.writeTable(ctx, tableKey, rows, &failedKeys, &errors); err != nil {
 			w.log.Debug("failed to write table", "table", tableKey, "error", err)
+			w.failed += int64(len(rows))
+			for _, row := range rows {
+				failedKeys = append(failedKeys, buildRowKey(row.Schema, row.Table, row.PrimaryKey))
+			}
+			errors = append(errors, fmt.Errorf("write table %s: %w", tableKey, err))
 		}
 	}
 
@@ -106,15 +112,36 @@ func (w *postgresWriter) writeTable(ctx context.Context, tableKey string, rows [
 	// Parse schema and table name
 	schema, table := parseTableKey(tableKey)
 
-	// Get column names from first row
-	firstRow := rows[0]
-	columns := make([]string, 0, len(firstRow.Data))
-	for col := range firstRow.Data {
+	// Compute the union of all columns across all rows in the batch.
+	colSet := make(map[string]string)
+	for _, row := range rows {
+		for col, typ := range row.ColumnTypes {
+			if _, exists := colSet[col]; !exists {
+				colSet[col] = typ
+			}
+		}
+		for col := range row.Data {
+			if _, exists := colSet[col]; !exists {
+				colSet[col] = "TEXT"
+			}
+		}
+	}
+	columns := make([]string, 0, len(colSet))
+	for col := range colSet {
 		columns = append(columns, col)
 	}
 	sort.Strings(columns)
 
-	if err := w.ensureTableExists(ctx, schema, table, firstRow, columns); err != nil {
+	// Build a merged row for table creation using the union column types.
+	mergedRow := postgresRow{
+		Table:       rows[0].Table,
+		Schema:      rows[0].Schema,
+		PrimaryKey:  rows[0].PrimaryKey,
+		Data:        rows[0].Data,
+		ColumnTypes: colSet,
+	}
+
+	if err := w.ensureTableExists(ctx, schema, table, mergedRow, columns); err != nil {
 		return fmt.Errorf("ensure table exists: %w", err)
 	}
 
@@ -134,10 +161,46 @@ func (w *postgresWriter) ensureTableExists(ctx context.Context, schema, table st
 			return err
 		}
 	}
+	// Add any missing columns for heterogeneous NoSQL sources.
+	return w.addMissingColumns(ctx, schema, table, columns, row)
+}
+
+func (w *postgresWriter) addMissingColumns(ctx context.Context, schema, table string, columns []string, row postgresRow) error {
+	rows, err := w.pool.Query(ctx,
+		"SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
+		schema, table)
+	if err != nil {
+		return nil // best-effort
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var colName string
+		if err := rows.Scan(&colName); err == nil {
+			existing[colName] = true
+		}
+	}
+	rows.Close()
+
+	for _, col := range columns {
+		if existing[col] {
+			continue
+		}
+		colType := "TEXT"
+		if mapped, ok := row.ColumnTypes[col]; ok && mapped != "" {
+			colType = normalizePostgresColumnType(mapped)
+		}
+		alterStmt := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s %s",
+			quoteIdentifier(schema), quoteIdentifier(table),
+			quoteIdentifier(col), colType)
+		if _, err := w.pool.Exec(ctx, alterStmt); err != nil {
+			return fmt.Errorf("add column %s: %w", col, err)
+		}
+	}
 	return nil
 }
 
 func buildCreateTableStatements(schema, table string, row postgresRow, columns []string) []string {
+	schema = normalizePostgresSchema(schema)
 	stmts := []string{
 		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quoteIdentifier(schema)),
 	}
@@ -146,7 +209,7 @@ func buildCreateTableStatements(schema, table string, row postgresRow, columns [
 	for _, col := range columns {
 		colType := "TEXT"
 		if mapped, ok := row.ColumnTypes[col]; ok && mapped != "" {
-			colType = mapped
+			colType = normalizePostgresColumnType(mapped)
 		}
 		defs = append(defs, fmt.Sprintf("%s %s", quoteIdentifier(col), colType))
 	}
@@ -365,9 +428,68 @@ func (s *postgresRowSource) Err() error {
 func parseTableKey(key string) (schema, table string) {
 	parts := strings.SplitN(key, ".", 2)
 	if len(parts) == 2 {
-		return parts[0], parts[1]
+		return normalizePostgresSchema(parts[0]), parts[1]
 	}
 	return "public", key
+}
+
+func normalizePostgresSchema(schema string) string {
+	if schema == "" {
+		return "public"
+	}
+	return schema
+}
+
+func normalizePostgresColumnType(colType string) string {
+	upper := strings.ToUpper(strings.TrimSpace(colType))
+	switch {
+	case upper == "":
+		return "TEXT"
+	case upper == "INT2":
+		return "SMALLINT"
+	case upper == "INT8":
+		return "BIGINT"
+	case strings.HasPrefix(upper, "BIGINT"):
+		return "BIGINT"
+	case strings.HasPrefix(upper, "SMALLINT"):
+		return "SMALLINT"
+	case strings.HasPrefix(upper, "INTEGER") || strings.HasPrefix(upper, "INT"):
+		return "INTEGER"
+	case strings.HasPrefix(upper, "SMALLINT"):
+		return "SMALLINT"
+	case strings.HasPrefix(upper, "TINYINT"):
+		return "SMALLINT"
+	case strings.HasPrefix(upper, "MEDIUMINT"):
+		return "INTEGER"
+	case strings.HasPrefix(upper, "FLOAT"):
+		return "REAL"
+	case strings.HasPrefix(upper, "DOUBLE"):
+		return "DOUBLE PRECISION"
+	case strings.HasPrefix(upper, "REAL"):
+		return "REAL"
+	case strings.HasPrefix(upper, "DECIMAL") || strings.HasPrefix(upper, "NUMERIC"):
+		return "NUMERIC"
+	case strings.HasPrefix(upper, "VARCHAR"):
+		return "VARCHAR"
+	case strings.HasPrefix(upper, "CHAR"):
+		return "CHAR"
+	case strings.HasPrefix(upper, "LONGTEXT") || strings.HasPrefix(upper, "MEDIUMTEXT") || strings.HasPrefix(upper, "TINYTEXT") || strings.HasPrefix(upper, "TEXT"):
+		return "TEXT"
+	case strings.HasPrefix(upper, "JSON"):
+		return "JSONB"
+	case strings.HasPrefix(upper, "BLOB") || strings.HasPrefix(upper, "LONGBLOB") || strings.HasPrefix(upper, "MEDIUMBLOB") || strings.HasPrefix(upper, "TINYBLOB") || strings.HasPrefix(upper, "BINARY") || strings.HasPrefix(upper, "VARBINARY"):
+		return "BYTEA"
+	case strings.HasPrefix(upper, "DATETIME") || strings.HasPrefix(upper, "TIMESTAMP"):
+		return "TIMESTAMP"
+	case upper == "DATE":
+		return "DATE"
+	case upper == "TIME":
+		return "TIME"
+	case strings.HasPrefix(upper, "BOOL") || strings.HasPrefix(upper, "BOOLEAN"):
+		return "BOOLEAN"
+	default:
+		return colType
+	}
 }
 
 // buildPlaceholders builds a placeholder string like "$1, $2, $3".
@@ -412,6 +534,28 @@ func coercePostgresValue(v any, columnType string) any {
 		return n.String()
 	}
 	if s, ok := v.(string); ok {
+		switch {
+		case strings.Contains(ct, "INT") || strings.Contains(ct, "SERIAL"):
+			if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+				return i
+			}
+		case strings.HasPrefix(ct, "NUMERIC") || strings.HasPrefix(ct, "DECIMAL"):
+			return s
+		case strings.HasPrefix(ct, "REAL") || strings.HasPrefix(ct, "DOUBLE") || strings.HasPrefix(ct, "FLOAT"):
+			if f, err := strconv.ParseFloat(s, 64); err == nil {
+				return f
+			}
+		case ct == "BOOLEAN" || ct == "BOOL":
+			if b, err := strconv.ParseBool(s); err == nil {
+				return b
+			}
+			if s == "0" {
+				return false
+			}
+			if s == "1" {
+				return true
+			}
+		}
 		if strings.HasPrefix(ct, "TIMESTAMP") || strings.HasPrefix(ct, "TIMESTAMPTZ") {
 			for _, layout := range []string{
 				time.RFC3339Nano,

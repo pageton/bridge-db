@@ -9,7 +9,7 @@ import (
 
 type MariaDBConfig struct {
 	Host     string `yaml:"host" json:"host"`
-	Port     int    `yaml:"port" json:"port"`
+	Port     *int   `yaml:"port" json:"port"`
 	Username string `yaml:"username" json:"username"`
 	Password string `yaml:"password" json:"password"`
 	Database string `yaml:"database" json:"database"`
@@ -18,19 +18,19 @@ type MariaDBConfig struct {
 func DefaultMariaDBConfig() MariaDBConfig {
 	return MariaDBConfig{
 		Host: "127.0.0.1",
-		Port: 3306,
+		Port: IntPtr(3306),
 	}
 }
 
 func (c MariaDBConfig) Address() string {
-	if c.Port == 0 {
+	if c.GetPort() == 0 {
 		return fmt.Sprintf("unix(%s)", c.Host)
 	}
-	return fmt.Sprintf("tcp(%s:%d)", c.Host, c.Port)
+	return fmt.Sprintf("tcp(%s:%d)", c.Host, c.GetPort())
 }
 
 func (c MariaDBConfig) IsUnixSocket() bool {
-	return c.Port == 0 && len(c.Host) > 0
+	return c.GetPort() == 0 && len(c.Host) > 0
 }
 
 func (c MariaDBConfig) DSN() string {
@@ -39,7 +39,7 @@ func (c MariaDBConfig) DSN() string {
 			c.Username, c.Host, c.Database)
 	}
 	return fmt.Sprintf("%s:***@tcp(%s:%d)/%s",
-		c.Username, c.Host, c.Port, c.Database)
+		c.Username, c.Host, c.GetPort(), c.Database)
 }
 
 func (c MariaDBConfig) DSNWithPassword() string {
@@ -48,7 +48,7 @@ func (c MariaDBConfig) DSNWithPassword() string {
 			c.Username, c.Password, c.Host, c.Database)
 	}
 	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s",
-		c.Username, c.Password, c.Host, c.Port, c.Database)
+		c.Username, c.Password, c.Host, c.GetPort(), c.Database)
 }
 
 var (
@@ -71,11 +71,11 @@ func ParseMariaDBURL(rawURL string) (MariaDBConfig, error) {
 	if u.Host != "" {
 		if matches := mariadbUnix.FindStringSubmatch(u.Host); len(matches) == 2 {
 			cfg.Host = matches[1]
-			cfg.Port = 0
+			cfg.Port = IntPtr(0)
 		} else if matches := mariadbTCP.FindStringSubmatch(u.Host); len(matches) == 3 {
 			cfg.Host = matches[1]
 			if p, err := strconv.Atoi(matches[2]); err == nil {
-				cfg.Port = p
+				cfg.Port = IntPtr(p)
 			}
 		} else {
 			host := u.Hostname()
@@ -84,7 +84,7 @@ func ParseMariaDBURL(rawURL string) (MariaDBConfig, error) {
 			}
 			if portStr := u.Port(); portStr != "" {
 				if p, err := strconv.Atoi(portStr); err == nil {
-					cfg.Port = p
+					cfg.Port = IntPtr(p)
 				}
 			}
 		}
@@ -108,7 +108,7 @@ func (c MariaDBConfig) Validate() error {
 	if c.Host == "" {
 		return fmt.Errorf("mariadb host is required")
 	}
-	if !c.IsUnixSocket() && (c.Port <= 0 || c.Port > 65535) {
+	if !c.IsUnixSocket() && (c.GetPort() <= 0 || c.GetPort() > 65535) {
 		return fmt.Errorf("mariadb port must be between 1 and 65535")
 	}
 	if c.Database == "" {
@@ -117,6 +117,11 @@ func (c MariaDBConfig) Validate() error {
 	return nil
 }
 
-func (c MariaDBConfig) GetHost() string     { return c.Host }
-func (c MariaDBConfig) GetPort() int        { return c.Port }
+func (c MariaDBConfig) GetHost() string { return c.Host }
+func (c MariaDBConfig) GetPort() int {
+	if c.Port == nil {
+		return 0
+	}
+	return *c.Port
+}
 func (c MariaDBConfig) GetDatabase() string { return c.Database }

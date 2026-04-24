@@ -21,7 +21,7 @@ func ApplyOverrides(cfg *ConnectionConfig, ov OverrideFields) {
 			cfg.Postgres.Host = ov.Host
 		}
 		if ov.Port != 0 {
-			cfg.Postgres.Port = ov.Port
+			cfg.Postgres.Port = IntPtr(ov.Port)
 		}
 		if ov.User != "" {
 			cfg.Postgres.Username = ov.User
@@ -40,7 +40,7 @@ func ApplyOverrides(cfg *ConnectionConfig, ov OverrideFields) {
 			cfg.MySQL.Host = ov.Host
 		}
 		if ov.Port != 0 {
-			cfg.MySQL.Port = ov.Port
+			cfg.MySQL.Port = IntPtr(ov.Port)
 		}
 		if ov.User != "" {
 			cfg.MySQL.Username = ov.User
@@ -59,7 +59,7 @@ func ApplyOverrides(cfg *ConnectionConfig, ov OverrideFields) {
 			cfg.Redis.Host = ov.Host
 		}
 		if ov.Port != 0 {
-			cfg.Redis.Port = ov.Port
+			cfg.Redis.Port = IntPtr(ov.Port)
 		}
 		if ov.Password != "" {
 			cfg.Redis.Password = ov.Password
@@ -72,7 +72,7 @@ func ApplyOverrides(cfg *ConnectionConfig, ov OverrideFields) {
 			cfg.MongoDB.Host = ov.Host
 		}
 		if ov.Port != 0 {
-			cfg.MongoDB.Port = ov.Port
+			cfg.MongoDB.Port = IntPtr(ov.Port)
 		}
 		if ov.User != "" {
 			cfg.MongoDB.Username = ov.User
@@ -101,7 +101,7 @@ func ApplyOverrides(cfg *ConnectionConfig, ov OverrideFields) {
 			cfg.MariaDB.Host = ov.Host
 		}
 		if ov.Port != 0 {
-			cfg.MariaDB.Port = ov.Port
+			cfg.MariaDB.Port = IntPtr(ov.Port)
 		}
 		if ov.User != "" {
 			cfg.MariaDB.Username = ov.User
@@ -120,7 +120,7 @@ func ApplyOverrides(cfg *ConnectionConfig, ov OverrideFields) {
 			cfg.CockroachDB.Host = ov.Host
 		}
 		if ov.Port != 0 {
-			cfg.CockroachDB.Port = ov.Port
+			cfg.CockroachDB.Port = IntPtr(ov.Port)
 		}
 		if ov.User != "" {
 			cfg.CockroachDB.Username = ov.User
@@ -139,7 +139,7 @@ func ApplyOverrides(cfg *ConnectionConfig, ov OverrideFields) {
 			cfg.MSSQL.Host = ov.Host
 		}
 		if ov.Port != 0 {
-			cfg.MSSQL.Port = ov.Port
+			cfg.MSSQL.Port = IntPtr(ov.Port)
 		}
 		if ov.User != "" {
 			cfg.MSSQL.Username = ov.User

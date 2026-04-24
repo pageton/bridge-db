@@ -11,7 +11,7 @@ func TestResolveCliProviderConfig_WithTunnelPreservesProviderFields(t *testing.T
 		Provider: "postgres",
 		Postgres: &config.PostgresConfig{
 			Host:     "db.internal",
-			Port:     5432,
+			Port:     config.IntPtr(5432),
 			Username: "bridge",
 			Password: "secret",
 			Database: "app",
@@ -29,8 +29,8 @@ func TestResolveCliProviderConfig_WithTunnelPreservesProviderFields(t *testing.T
 		t.Fatalf("resolveCliProviderConfig() type = %T, want *config.PostgresConfig", raw)
 	}
 
-	if got.Host != "127.0.0.1" || got.Port != 15432 {
-		t.Fatalf("tunneled address = %s:%d, want 127.0.0.1:15432", got.Host, got.Port)
+	if got.Host != "127.0.0.1" || *got.Port != 15432 {
+		t.Fatalf("tunneled address = %s:%d, want 127.0.0.1:15432", got.Host, *got.Port)
 	}
 	if got.Username != "bridge" {
 		t.Errorf("username = %q, want bridge", got.Username)

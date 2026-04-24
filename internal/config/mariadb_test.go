@@ -12,8 +12,8 @@ func TestParseMariaDBURL_PlainHostPort(t *testing.T) {
 	if cfg.Host != "dbhost" {
 		t.Errorf("host = %q", cfg.Host)
 	}
-	if cfg.Port != 3307 {
-		t.Errorf("port = %d", cfg.Port)
+	if *cfg.Port != 3307 {
+		t.Errorf("port = %d", *cfg.Port)
 	}
 	if cfg.Username != "root" {
 		t.Errorf("username = %q", cfg.Username)
@@ -34,8 +34,8 @@ func TestParseMariaDBURL_TCPInHost(t *testing.T) {
 	if cfg.Host != "dbhost" {
 		t.Errorf("host = %q", cfg.Host)
 	}
-	if cfg.Port != 3307 {
-		t.Errorf("port = %d", cfg.Port)
+	if *cfg.Port != 3307 {
+		t.Errorf("port = %d", *cfg.Port)
 	}
 	if cfg.Database != "mydb" {
 		t.Errorf("database = %q", cfg.Database)
@@ -65,11 +65,11 @@ func TestMariaDBConfig_Validate(t *testing.T) {
 		cfg     MariaDBConfig
 		wantErr bool
 	}{
-		{name: "valid", cfg: MariaDBConfig{Host: "localhost", Port: 3306, Database: "db"}},
-		{name: "empty host", cfg: MariaDBConfig{Host: "", Port: 3306, Database: "db"}, wantErr: true},
-		{name: "bad port", cfg: MariaDBConfig{Host: "localhost", Port: 99999, Database: "db"}, wantErr: true},
-		{name: "empty database", cfg: MariaDBConfig{Host: "localhost", Port: 3306, Database: ""}, wantErr: true},
-		{name: "unix socket", cfg: MariaDBConfig{Host: "/sock", Port: 0, Database: "db"}},
+		{name: "valid", cfg: MariaDBConfig{Host: "localhost", Port: IntPtr(3306), Database: "db"}},
+		{name: "empty host", cfg: MariaDBConfig{Host: "", Port: IntPtr(3306), Database: "db"}, wantErr: true},
+		{name: "bad port", cfg: MariaDBConfig{Host: "localhost", Port: IntPtr(99999), Database: "db"}, wantErr: true},
+		{name: "empty database", cfg: MariaDBConfig{Host: "localhost", Port: IntPtr(3306), Database: ""}, wantErr: true},
+		{name: "unix socket", cfg: MariaDBConfig{Host: "/sock", Port: IntPtr(0), Database: "db"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -82,21 +82,21 @@ func TestMariaDBConfig_Validate(t *testing.T) {
 }
 
 func TestMariaDBConfig_DSN(t *testing.T) {
-	cfg := MariaDBConfig{Host: "db", Port: 3306, Username: "u", Password: "p", Database: "d"}
+	cfg := MariaDBConfig{Host: "db", Port: IntPtr(3306), Username: "u", Password: "p", Database: "d"}
 	if got := cfg.DSN(); got != "u:***@tcp(db:3306)/d" {
 		t.Errorf("DSN() = %q", got)
 	}
 }
 
 func TestMariaDBConfig_DSNWithPassword(t *testing.T) {
-	cfg := MariaDBConfig{Host: "db", Port: 3306, Username: "u", Password: "p", Database: "d"}
+	cfg := MariaDBConfig{Host: "db", Port: IntPtr(3306), Username: "u", Password: "p", Database: "d"}
 	if got := cfg.DSNWithPassword(); got != "u:p@tcp(db:3306)/d" {
 		t.Errorf("DSNWithPassword() = %q", got)
 	}
 }
 
 func TestMergeMariaDB(t *testing.T) {
-	base := MariaDBConfig{Host: "h1", Port: 3306}
+	base := MariaDBConfig{Host: "h1", Port: IntPtr(3306)}
 	override := MariaDBConfig{Host: "h2", Database: "d2"}
 	result := mergeStruct(base, override)
 	if result.Host != "h2" {

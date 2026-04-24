@@ -289,7 +289,7 @@ func postgresConfigFromMap(m map[string]string) (*config.PostgresConfig, error) 
 
 	cfg := config.DefaultPostgresConfig()
 	cfg.Host = host
-	cfg.Port = portStr
+	cfg.Port = config.IntPtr(portStr)
 
 	// Copy database name if provided
 	if db := m["database"]; db != "" {
@@ -306,7 +306,7 @@ func postgresConfigFromMap(m map[string]string) (*config.PostgresConfig, error) 
 
 // buildPostgresConnStr constructs a PostgreSQL connection string from config.
 func buildPostgresConnStr(cfg *config.PostgresConfig) string {
-	connStr := fmt.Sprintf("host=%s port=%d", cfg.Host, cfg.Port)
+	connStr := fmt.Sprintf("host=%s port=%d", cfg.Host, cfg.GetPort())
 
 	if cfg.Database != "" {
 		connStr += fmt.Sprintf(" dbname=%s", cfg.Database)

@@ -37,6 +37,11 @@ type PipelineOptions struct {
 	// RetryBackoff is the initial delay between retries.
 	RetryBackoff time.Duration
 
+	// MaxPerUnitRetry limits how many units from a partially-failed batch
+	// are retried individually. 0 means no per-unit retry.
+	// Default: min(BatchSize, 100).
+	MaxPerUnitRetry int
+
 	// Parallel controls the scan/write buffer depth between the scanner
 	// and writer goroutines. Higher values allow more pipelining but use
 	// more memory. Default: 4.
@@ -94,6 +99,7 @@ func DefaultPipelineOptions() PipelineOptions {
 		FKHandling:         "defer_constraints",
 		MaxRetries:         3,
 		RetryBackoff:       500 * time.Millisecond,
+		MaxPerUnitRetry:    0, // resolved to min(BatchSize, 100) by Validate
 		Parallel:           4,
 		WriteWorkers:       1,
 		MaxBatchBytes:      32 * 1024 * 1024, // 32 MB
@@ -110,6 +116,9 @@ func (o PipelineOptions) Validate() error {
 	}
 	if o.MaxRetries < 0 {
 		return fmt.Errorf("max_retries must be non-negative, got %d", o.MaxRetries)
+	}
+	if o.MaxPerUnitRetry < 0 {
+		return fmt.Errorf("max_per_unit_retry must be non-negative, got %d", o.MaxPerUnitRetry)
 	}
 	if o.Parallel < 1 {
 		return fmt.Errorf("parallel must be at least 1, got %d", o.Parallel)

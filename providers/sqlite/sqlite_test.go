@@ -3,6 +3,8 @@
 package sqlite
 
 import (
+	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/pageton/bridge-db/internal/config"
@@ -184,6 +186,44 @@ func TestBuildPlaceholders_One(t *testing.T) {
 	got := buildPlaceholders(1)
 	if got != "?" {
 		t.Errorf("buildPlaceholders(1) = %q, want %q", got, "?")
+	}
+}
+
+func TestSQLiteSchemaInspect_PreservesIntegerPrimaryKeyIndex(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT NOT NULL)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	m := newSQLiteSchemaMigrator(db)
+	schema, err := m.Inspect(context.Background())
+	if err != nil {
+		t.Fatalf("inspect: %v", err)
+	}
+	if len(schema.Tables) != 1 {
+		t.Fatalf("len(schema.Tables) = %d, want 1", len(schema.Tables))
+	}
+
+	var primary *bool
+	var columns []string
+	for _, idx := range schema.Tables[0].Indexes {
+		if idx.Primary {
+			v := true
+			primary = &v
+			columns = idx.Columns
+			break
+		}
+	}
+	if primary == nil {
+		t.Fatal("expected primary index to be preserved")
+	}
+	if len(columns) != 1 || columns[0] != "id" {
+		t.Fatalf("primary index columns = %v, want [id]", columns)
 	}
 }
 

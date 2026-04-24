@@ -67,7 +67,7 @@ func (p *MSSQLProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 	p.db = db
 
 	log := logger.L().With("provider", "mssql", "role", p.role)
-	log.Debug("configured mssql client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
+	log.Debug("configured mssql client", "host", cfg.Host, "port", cfg.GetPort(), "database", cfg.Database)
 
 	return nil
 }
@@ -302,7 +302,7 @@ func mssqlConfigFromMap(m map[string]string) (*config.MSSQLConfig, error) {
 
 	cfg := config.DefaultMSSQLConfig()
 	cfg.Host = host
-	cfg.Port = port
+	cfg.Port = config.IntPtr(port)
 
 	if db := m["database"]; db != "" {
 		cfg.Database = db

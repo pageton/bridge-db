@@ -12,8 +12,8 @@ func TestParsePostgresURL_Full(t *testing.T) {
 	if cfg.Host != "dbhost" {
 		t.Errorf("host = %q", cfg.Host)
 	}
-	if cfg.Port != 5433 {
-		t.Errorf("port = %d", cfg.Port)
+	if *cfg.Port != 5433 {
+		t.Errorf("port = %d", *cfg.Port)
 	}
 	if cfg.Username != "admin" {
 		t.Errorf("username = %q", cfg.Username)
@@ -52,10 +52,10 @@ func TestPostgresConfig_Validate(t *testing.T) {
 		cfg     PostgresConfig
 		wantErr bool
 	}{
-		{name: "valid", cfg: PostgresConfig{Host: "localhost", Port: 5432, Database: "mydb"}},
-		{name: "empty host", cfg: PostgresConfig{Host: "", Port: 5432, Database: "mydb"}, wantErr: true},
-		{name: "empty database", cfg: PostgresConfig{Host: "localhost", Port: 5432, Database: ""}, wantErr: true},
-		{name: "bad port", cfg: PostgresConfig{Host: "localhost", Port: 0, Database: "mydb"}, wantErr: true},
+		{name: "valid", cfg: PostgresConfig{Host: "localhost", Port: IntPtr(5432), Database: "mydb"}},
+		{name: "empty host", cfg: PostgresConfig{Host: "", Port: IntPtr(5432), Database: "mydb"}, wantErr: true},
+		{name: "empty database", cfg: PostgresConfig{Host: "localhost", Port: IntPtr(5432), Database: ""}, wantErr: true},
+		{name: "bad port", cfg: PostgresConfig{Host: "localhost", Port: IntPtr(0), Database: "mydb"}, wantErr: true},
 		{name: "unix socket no port needed", cfg: PostgresConfig{Host: "/run/postgresql", Database: "mydb"}},
 	}
 	for _, tt := range tests {
@@ -69,7 +69,7 @@ func TestPostgresConfig_Validate(t *testing.T) {
 }
 
 func TestPostgresConfig_DSN_TCP(t *testing.T) {
-	cfg := PostgresConfig{Host: "db.example.com", Port: 5432, Username: "u", Password: "p", Database: "d", SSLMode: "require"}
+	cfg := PostgresConfig{Host: "db.example.com", Port: IntPtr(5432), Username: "u", Password: "p", Database: "d", SSLMode: "require"}
 	dsn := cfg.DSN()
 	if dsn != "host=db.example.com port=5432 user=u password=xxxxx dbname=d sslmode=require" {
 		t.Errorf("DSN() = %q", dsn)
@@ -85,7 +85,7 @@ func TestPostgresConfig_DSN_UnixSocket(t *testing.T) {
 }
 
 func TestPostgresConfig_Address(t *testing.T) {
-	cfg := PostgresConfig{Host: "db.example.com", Port: 5433}
+	cfg := PostgresConfig{Host: "db.example.com", Port: IntPtr(5433)}
 	if got := cfg.Address(); got != "db.example.com:5433" {
 		t.Errorf("Address() = %q", got)
 	}
@@ -111,14 +111,14 @@ func TestParsePostgresURL_QueryParams(t *testing.T) {
 }
 
 func TestMergePostgres(t *testing.T) {
-	base := PostgresConfig{Host: "h1", Port: 5432, Username: "u1", SSLMode: "prefer"}
+	base := PostgresConfig{Host: "h1", Port: IntPtr(5432), Username: "u1", SSLMode: "prefer"}
 	override := PostgresConfig{Host: "h2", SSLMode: "require"}
 	result := mergeStruct(base, override)
 	if result.Host != "h2" {
 		t.Errorf("host = %q", result.Host)
 	}
-	if result.Port != 5432 {
-		t.Errorf("port = %d, want 5432 (not overridden)", result.Port)
+	if *result.Port != 5432 {
+		t.Errorf("port = %d, want 5432 (not overridden)", *result.Port)
 	}
 	if result.SSLMode != "require" {
 		t.Errorf("sslmode = %q", result.SSLMode)

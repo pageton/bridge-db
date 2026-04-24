@@ -12,8 +12,8 @@ func TestParseCockroachDBURL_Full(t *testing.T) {
 	if cfg.Host != "crhost" {
 		t.Errorf("host = %q", cfg.Host)
 	}
-	if cfg.Port != 26258 {
-		t.Errorf("port = %d", cfg.Port)
+	if *cfg.Port != 26258 {
+		t.Errorf("port = %d", *cfg.Port)
 	}
 	if cfg.Username != "root" {
 		t.Errorf("username = %q", cfg.Username)
@@ -52,10 +52,10 @@ func TestCockroachDBConfig_Validate(t *testing.T) {
 		cfg     CockroachDBConfig
 		wantErr bool
 	}{
-		{name: "valid", cfg: CockroachDBConfig{Host: "localhost", Port: 26257, Database: "db"}},
-		{name: "empty host", cfg: CockroachDBConfig{Host: "", Port: 26257, Database: "db"}, wantErr: true},
-		{name: "empty database", cfg: CockroachDBConfig{Host: "localhost", Port: 26257, Database: ""}, wantErr: true},
-		{name: "bad port", cfg: CockroachDBConfig{Host: "localhost", Port: 0, Database: "db"}, wantErr: true},
+		{name: "valid", cfg: CockroachDBConfig{Host: "localhost", Port: IntPtr(26257), Database: "db"}},
+		{name: "empty host", cfg: CockroachDBConfig{Host: "", Port: IntPtr(26257), Database: "db"}, wantErr: true},
+		{name: "empty database", cfg: CockroachDBConfig{Host: "localhost", Port: IntPtr(26257), Database: ""}, wantErr: true},
+		{name: "bad port", cfg: CockroachDBConfig{Host: "localhost", Port: IntPtr(0), Database: "db"}, wantErr: true},
 		{name: "unix socket", cfg: CockroachDBConfig{Host: "/run/crdb", Database: "db"}},
 	}
 	for _, tt := range tests {
@@ -69,7 +69,7 @@ func TestCockroachDBConfig_Validate(t *testing.T) {
 }
 
 func TestCockroachDBConfig_DSN(t *testing.T) {
-	cfg := CockroachDBConfig{Host: "crdb", Port: 26257, Username: "u", Password: "p", Database: "d", SSLMode: "require"}
+	cfg := CockroachDBConfig{Host: "crdb", Port: IntPtr(26257), Username: "u", Password: "p", Database: "d", SSLMode: "require"}
 	dsn := cfg.DSN()
 	if dsn != "host=crdb port=26257 user=u password=xxxxx dbname=d sslmode=require" {
 		t.Errorf("DSN() = %q", dsn)
@@ -78,8 +78,8 @@ func TestCockroachDBConfig_DSN(t *testing.T) {
 
 func TestDefaultCockroachDBConfig(t *testing.T) {
 	cfg := DefaultCockroachDBConfig()
-	if cfg.Port != 26257 {
-		t.Errorf("default port = %d", cfg.Port)
+	if *cfg.Port != 26257 {
+		t.Errorf("default port = %d", *cfg.Port)
 	}
 	if cfg.Username != "root" {
 		t.Errorf("default username = %q", cfg.Username)
@@ -87,7 +87,7 @@ func TestDefaultCockroachDBConfig(t *testing.T) {
 }
 
 func TestMergeCockroachDB(t *testing.T) {
-	base := CockroachDBConfig{Host: "h1", Port: 26257, SSLMode: "prefer"}
+	base := CockroachDBConfig{Host: "h1", Port: IntPtr(26257), SSLMode: "prefer"}
 	override := CockroachDBConfig{Host: "h2", Database: "d2", SSLMode: "require"}
 	result := mergeStruct(base, override)
 	if result.Host != "h2" {

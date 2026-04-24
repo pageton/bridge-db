@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -146,6 +147,12 @@ func (m *cockroachDBSchemaMigrator) getTableColumns(ctx context.Context, schema,
 			continue
 		}
 
+		// CockroachDB adds a hidden "rowid" column to tables. It is not a
+		// real user column and should not be migrated.
+		if col.Name == "rowid" {
+			continue
+		}
+
 		col.Nullable = nullable == "YES"
 		if defaultVal != nil {
 			col.Default = *defaultVal
@@ -189,6 +196,17 @@ func (m *cockroachDBSchemaMigrator) getTableIndexes(ctx context.Context, schema,
 		}
 
 		idx.Columns = columns
+		// Filter out CockroachDB's hidden "rowid" column from index definitions.
+		filtered := make([]string, 0, len(columns))
+		for _, c := range columns {
+			if c != "rowid" {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) == 0 {
+			continue
+		}
+		idx.Columns = filtered
 		indexes = append(indexes, idx)
 	}
 
@@ -256,6 +274,9 @@ func (m *cockroachDBSchemaMigrator) createTable(ctx context.Context, table provi
 	if _, err := m.pool.Exec(ctx, query); err != nil {
 		return err
 	}
+	if err := m.waitForTable(ctx, table.Name, len(table.Columns)); err != nil {
+		return err
+	}
 
 	for _, idx := range table.Indexes {
 		if idx.Primary {
@@ -268,6 +289,32 @@ func (m *cockroachDBSchemaMigrator) createTable(ctx context.Context, table provi
 
 	m.log.Debug("created table", "table", table.Name)
 	return nil
+}
+
+func (m *cockroachDBSchemaMigrator) waitForTable(ctx context.Context, table string, wantColumns int) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var count int
+		err := m.pool.QueryRow(ctx, `
+			SELECT count(*)
+			FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = $1
+		`, table).Scan(&count)
+		if err == nil && count >= wantColumns {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("wait for table %s visibility: %w", table, err)
+			}
+			return fmt.Errorf("wait for table %s visibility: have %d columns, want at least %d", table, count, wantColumns)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func (m *cockroachDBSchemaMigrator) createIndex(ctx context.Context, table string, idx provider.IndexSchema) error {

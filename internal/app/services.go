@@ -229,7 +229,10 @@ func (VerificationService) VerifyMigration(ctx context.Context, cfg *config.Migr
 		return nil, fmt.Errorf("dest ping: %w", err)
 	}
 
-	cv := verifypkg.NewCrossVerifier(srcProvider, dstProvider, opts)
+	cv, err := verifypkg.NewCrossVerifier(srcProvider, dstProvider, opts)
+	if err != nil {
+		return nil, err
+	}
 	return cv.Verify(ctx)
 }
 

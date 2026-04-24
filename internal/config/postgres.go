@@ -9,7 +9,7 @@ import (
 // PostgresConfig holds PostgreSQL-specific connection parameters.
 type PostgresConfig struct {
 	Host     string `yaml:"host" json:"host"`
-	Port     int    `yaml:"port" json:"port"`
+	Port     *int   `yaml:"port" json:"port"`
 	Username string `yaml:"username" json:"username"`
 	Password string `yaml:"password" json:"password"`
 	Database string `yaml:"database" json:"database"`
@@ -20,7 +20,7 @@ type PostgresConfig struct {
 func DefaultPostgresConfig() PostgresConfig {
 	return PostgresConfig{
 		Host:     "127.0.0.1",
-		Port:     5432,
+		Port:     IntPtr(5432),
 		Username: "postgres",
 		SSLMode:  "require",
 	}
@@ -28,7 +28,7 @@ func DefaultPostgresConfig() PostgresConfig {
 
 // Address returns the host:port string.
 func (c PostgresConfig) Address() string {
-	return fmt.Sprintf("%s:%d", c.Host, c.Port)
+	return fmt.Sprintf("%s:%d", c.Host, c.GetPort())
 }
 
 // DSN returns a PostgreSQL driver-compatible data source name.
@@ -38,7 +38,7 @@ func (c PostgresConfig) DSN() string {
 			c.Host, c.Username, c.Database, c.SSLMode)
 	}
 	return fmt.Sprintf("host=%s port=%d user=%s password=xxxxx dbname=%s sslmode=%s",
-		c.Host, c.Port, c.Username, c.Database, c.SSLMode)
+		c.Host, c.GetPort(), c.Username, c.Database, c.SSLMode)
 }
 
 func (c PostgresConfig) DSNWithPassword() string {
@@ -47,7 +47,7 @@ func (c PostgresConfig) DSNWithPassword() string {
 			c.Host, c.Username, c.Password, c.Database, c.SSLMode)
 	}
 	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		c.Host, c.Port, c.Username, c.Password, c.Database, c.SSLMode)
+		c.Host, c.GetPort(), c.Username, c.Password, c.Database, c.SSLMode)
 }
 
 // ParsePostgresURL parses a postgres:// or postgresql:// URL into a PostgresConfig.
@@ -88,7 +88,7 @@ func ParsePostgresURL(rawURL string) (PostgresConfig, error) {
 		}
 		if portStr := u.Port(); portStr != "" {
 			if p, err := strconv.Atoi(portStr); err == nil {
-				cfg.Port = p
+				cfg.Port = IntPtr(p)
 			}
 		}
 	}
@@ -119,7 +119,7 @@ func (c PostgresConfig) Validate() error {
 	}
 	// Port is only required for TCP connections (not Unix sockets).
 	if len(c.Host) > 0 && c.Host[0] != '/' {
-		if c.Port <= 0 || c.Port > 65535 {
+		if c.GetPort() <= 0 || c.GetPort() > 65535 {
 			return fmt.Errorf("postgres port must be between 1 and 65535")
 		}
 	}
@@ -129,6 +129,11 @@ func (c PostgresConfig) Validate() error {
 	return nil
 }
 
-func (c PostgresConfig) GetHost() string     { return c.Host }
-func (c PostgresConfig) GetPort() int        { return c.Port }
+func (c PostgresConfig) GetHost() string { return c.Host }
+func (c PostgresConfig) GetPort() int {
+	if c.Port == nil {
+		return 0
+	}
+	return *c.Port
+}
 func (c PostgresConfig) GetDatabase() string { return c.Database }

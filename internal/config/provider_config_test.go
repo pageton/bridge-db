@@ -7,7 +7,7 @@ func TestProviderConfigWithTunnel_PreservesPostgresFields(t *testing.T) {
 		Provider: "postgres",
 		Postgres: &PostgresConfig{
 			Host:     "db.internal",
-			Port:     5432,
+			Port:     IntPtr(5432),
 			Username: "bridge",
 			Password: "secret",
 			Database: "app",
@@ -25,8 +25,8 @@ func TestProviderConfigWithTunnel_PreservesPostgresFields(t *testing.T) {
 		t.Fatalf("ProviderConfigWithTunnel() type = %T, want *PostgresConfig", raw)
 	}
 
-	if got.Host != "127.0.0.1" || got.Port != 15432 {
-		t.Fatalf("tunneled address = %s:%d, want 127.0.0.1:15432", got.Host, got.Port)
+	if got.Host != "127.0.0.1" || *got.Port != 15432 {
+		t.Fatalf("tunneled address = %s:%d, want 127.0.0.1:15432", got.Host, *got.Port)
 	}
 	if got.Username != "bridge" {
 		t.Errorf("username = %q, want bridge", got.Username)
@@ -41,7 +41,7 @@ func TestProviderConfigWithTunnel_PreservesPostgresFields(t *testing.T) {
 		t.Errorf("sslmode = %q, want disable", got.SSLMode)
 	}
 
-	if conn.Postgres.Host != "db.internal" || conn.Postgres.Port != 5432 {
+	if conn.Postgres.Host != "db.internal" || *conn.Postgres.Port != 5432 {
 		t.Fatal("ProviderConfigWithTunnel() mutated original postgres config")
 	}
 }
@@ -51,12 +51,12 @@ func TestProviderConfigWithTunnel_PreservesMongoDBFields(t *testing.T) {
 		Provider: "mongodb",
 		MongoDB: &MongoDBConfig{
 			Host:       "mongo.internal",
-			Port:       27017,
+			Port:       IntPtr(27017),
 			Username:   "bridge",
 			Password:   "secret",
 			Database:   "app",
 			AuthSource: "admin",
-			TLS:        true,
+			TLS:        BoolPtr(true),
 		},
 	}
 
@@ -70,8 +70,8 @@ func TestProviderConfigWithTunnel_PreservesMongoDBFields(t *testing.T) {
 		t.Fatalf("ProviderConfigWithTunnel() type = %T, want *MongoDBConfig", raw)
 	}
 
-	if got.Host != "127.0.0.1" || got.Port != 27018 {
-		t.Fatalf("tunneled address = %s:%d, want 127.0.0.1:27018", got.Host, got.Port)
+	if got.Host != "127.0.0.1" || *got.Port != 27018 {
+		t.Fatalf("tunneled address = %s:%d, want 127.0.0.1:27018", got.Host, *got.Port)
 	}
 	if got.Username != "bridge" || got.Password != "secret" || got.Database != "app" {
 		t.Fatalf("credentials/database were not preserved: %+v", *got)
@@ -79,7 +79,7 @@ func TestProviderConfigWithTunnel_PreservesMongoDBFields(t *testing.T) {
 	if got.AuthSource != "admin" {
 		t.Errorf("auth_source = %q, want admin", got.AuthSource)
 	}
-	if !got.TLS {
+	if !*got.TLS {
 		t.Error("tls = false, want true")
 	}
 }
@@ -89,11 +89,11 @@ func TestProviderConfigWithTunnel_PreservesRedisFields(t *testing.T) {
 		Provider: "redis",
 		Redis: &RedisConfig{
 			Host:     "redis.internal",
-			Port:     6379,
+			Port:     IntPtr(6379),
 			Username: "bridge",
 			Password: "secret",
-			DB:       9,
-			TLS:      true,
+			DB:       IntPtr(9),
+			TLS:      BoolPtr(true),
 		},
 	}
 
@@ -107,16 +107,16 @@ func TestProviderConfigWithTunnel_PreservesRedisFields(t *testing.T) {
 		t.Fatalf("ProviderConfigWithTunnel() type = %T, want *RedisConfig", raw)
 	}
 
-	if got.Host != "127.0.0.1" || got.Port != 16379 {
-		t.Fatalf("tunneled address = %s:%d, want 127.0.0.1:16379", got.Host, got.Port)
+	if got.Host != "127.0.0.1" || *got.Port != 16379 {
+		t.Fatalf("tunneled address = %s:%d, want 127.0.0.1:16379", got.Host, *got.Port)
 	}
 	if got.Username != "bridge" || got.Password != "secret" {
 		t.Fatalf("credentials were not preserved: %+v", *got)
 	}
-	if got.DB != 9 {
-		t.Errorf("db = %d, want 9", got.DB)
+	if *got.DB != 9 {
+		t.Errorf("db = %d, want 9", *got.DB)
 	}
-	if !got.TLS {
+	if !*got.TLS {
 		t.Error("tls = false, want true")
 	}
 }

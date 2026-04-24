@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -131,15 +133,15 @@ func convertValue(value any, typeName string) any {
 // formatPrimaryKey formats a primary key map as a string for use as a key component.
 func formatPrimaryKey(pk map[string]any) string {
 	if len(pk) == 1 {
-		// Single column PK
-		for _, v := range pk {
-			return fmt.Sprintf("%v", v)
+		for _, k := range sortedPKKeys(pk) {
+			return fmt.Sprintf("%v", pk[k])
 		}
 	}
-
-	// Composite PK
-	b, _ := sonic.Marshal(pk)
-	return string(b)
+	parts := make([]string, 0, len(pk))
+	for _, k := range sortedPKKeys(pk) {
+		parts = append(parts, fmt.Sprintf("%q:%s", k, formatPKValue(pk[k])))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 // buildRowKey builds a unique key for a row in the format "schema.table:pk".
@@ -149,4 +151,21 @@ func buildRowKey(schema, table string, pk map[string]any) string {
 		key = schema + "." + table
 	}
 	return key + ":" + formatPrimaryKey(pk)
+}
+
+func sortedPKKeys(pk map[string]any) []string {
+	keys := make([]string, 0, len(pk))
+	for k := range pk {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func formatPKValue(v any) string {
+	b, err := sonic.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%q", fmt.Sprintf("%v", v))
+	}
+	return string(b)
 }

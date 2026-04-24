@@ -66,10 +66,79 @@ func TestCoercePostgresValue_TimestampParsesRFC3339(t *testing.T) {
 	}
 }
 
+func TestCoercePostgresValue_StringNumericsForMariaDBTypes(t *testing.T) {
+	if got := coercePostgresValue("118", "int"); got != int64(118) {
+		t.Fatalf("int coercion = %#v, want int64(118)", got)
+	}
+	if got := coercePostgresValue("670.2137952762896", "float"); got != 670.2137952762896 {
+		t.Fatalf("float coercion = %#v, want parsed float64", got)
+	}
+	if got := coercePostgresValue("1", "bool"); got != true {
+		t.Fatalf("bool coercion = %#v, want true", got)
+	}
+}
+
 func TestResolvePrimaryKeyMap_RewritesSingleColumnID(t *testing.T) {
 	pk := map[string]any{"id": "507f1f77bcf86cd799439011"}
 	got := resolvePrimaryKeyMap(context.Background(), nil, "public", "users", pk)
 	if got["id"] != "507f1f77bcf86cd799439011" {
 		t.Fatalf("nil pool should keep pk unchanged: %#v", got)
+	}
+}
+
+func TestBuildCreateTableStatements_DefaultsEmptySchemaToPublic(t *testing.T) {
+	row := postgresRow{
+		Table:      "orders",
+		PrimaryKey: map[string]any{"id": 1},
+		Data:       map[string]any{"id": 1, "status": "open"},
+		ColumnTypes: map[string]string{
+			"id":     "BIGINT",
+			"status": "TEXT",
+		},
+	}
+
+	stmts := buildCreateTableStatements("", "orders", row, []string{"id", "status"})
+	if stmts[0] != `CREATE SCHEMA IF NOT EXISTS "public"` {
+		t.Fatalf("schema statement = %q, want public schema", stmts[0])
+	}
+	if !strings.Contains(stmts[1], `CREATE TABLE IF NOT EXISTS "public"."orders"`) {
+		t.Fatalf("missing public orders create statement: %q", stmts[1])
+	}
+}
+
+func TestBuildCreateTableStatements_NormalizesMariaDBTypes(t *testing.T) {
+	row := postgresRow{
+		Table:      "orders",
+		Schema:     "public",
+		PrimaryKey: map[string]any{"id": 1},
+		Data: map[string]any{
+			"id":           1,
+			"status":       "open",
+			"total_amount": 12.5,
+		},
+		ColumnTypes: map[string]string{
+			"id":           "int",
+			"status":       "longtext",
+			"total_amount": "float",
+		},
+	}
+
+	stmts := buildCreateTableStatements("public", "orders", row, []string{"id", "status", "total_amount"})
+	ddl := stmts[1]
+	if !strings.Contains(ddl, `"id" INTEGER`) {
+		t.Fatalf("expected INTEGER mapping in %q", ddl)
+	}
+	if !strings.Contains(ddl, `"status" TEXT`) {
+		t.Fatalf("expected TEXT mapping in %q", ddl)
+	}
+	if !strings.Contains(ddl, `"total_amount" REAL`) {
+		t.Fatalf("expected REAL mapping in %q", ddl)
+	}
+}
+
+func TestParseTableKey_DefaultsEmptySchemaToPublic(t *testing.T) {
+	schema, table := parseTableKey(".orders")
+	if schema != "public" || table != "orders" {
+		t.Fatalf("parseTableKey('.orders') = (%q, %q), want ('public', 'orders')", schema, table)
 	}
 }

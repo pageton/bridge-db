@@ -13,9 +13,9 @@ import (
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
-// postgresScanner enumerates rows from a PostgreSQL database using cursor-based
-// pagination. It first lists all tables, then scans each table with
-// a cursor, yielding batches of MigrationUnits.
+// postgresScanner enumerates rows from a PostgreSQL database using
+// LIMIT/OFFSET pagination. It lists all tables, then scans each table
+// in batches, yielding batches of MigrationUnits.
 type postgresScanner struct {
 	pool            *pgxpool.Pool
 	opts            provider.ScanOptions
@@ -26,6 +26,7 @@ type postgresScanner struct {
 	columns         []columnInfo
 	pkColumns       []string
 	done            bool
+	offset          int
 	tablesCompleted map[string]bool // tables to skip on resume
 	log             interface {
 		Debug(msg string, args ...any)
@@ -80,7 +81,8 @@ func newPostgresScanner(pool *pgxpool.Pool, opts provider.ScanOptions) *postgres
 }
 
 // Next returns the next batch of MigrationUnits. It returns io.EOF when
-// all tables have been scanned.
+// all tables have been scanned. Rows are fetched in batches using
+// LIMIT/OFFSET to bound memory usage per table scan.
 func (s *postgresScanner) Next(ctx context.Context) ([]provider.MigrationUnit, error) {
 	if s.done {
 		return nil, io.EOF
@@ -91,7 +93,6 @@ func (s *postgresScanner) Next(ctx context.Context) ([]provider.MigrationUnit, e
 		batchSize = 1000
 	}
 
-	// If we don't have tables listed yet, do that first
 	if s.tables == nil {
 		if err := s.listTables(ctx); err != nil {
 			return nil, err
@@ -102,12 +103,10 @@ func (s *postgresScanner) Next(ctx context.Context) ([]provider.MigrationUnit, e
 		}
 	}
 
-	// Collect units until we have a full batch or run out of data
-	units := make([]provider.MigrationUnit, 0, batchSize)
-
-	for len(units) < batchSize && !s.done {
-		// If we have rows, get next row
-		if s.rows != nil && s.rows.Next() {
+	// If we have leftover rows from a previous fetch, drain them first.
+	if s.rows != nil {
+		units := make([]provider.MigrationUnit, 0, batchSize)
+		for s.rows.Next() && len(units) < batchSize {
 			unit, err := s.readRow(ctx)
 			if err != nil {
 				s.log.Debug("failed to read row, skipping",
@@ -118,55 +117,85 @@ func (s *postgresScanner) Next(ctx context.Context) ([]provider.MigrationUnit, e
 			units = append(units, *unit)
 			s.stats.TotalScanned++
 			s.stats.TotalBytes += unit.Size
-			continue
 		}
-
-		// Check for row error
-		if s.rows != nil {
-			if err := s.rows.Err(); err != nil {
-				s.log.Debug("row error", "table", s.tables[s.currentTable].Name, "error", err)
-			}
-			s.rows.Close()
-			s.rows = nil
-			s.currentTable++
-			s.stats.TablesDone++
+		if err := s.rows.Err(); err != nil {
+			s.log.Debug("row error", "table", s.tables[s.currentTable].Name, "error", err)
 		}
-
-		// Move to next table or finish
-		if s.currentTable >= len(s.tables) {
-			s.done = true
-			break
+		s.rows.Close()
+		s.rows = nil
+		if len(units) > 0 {
+			s.offset += len(units)
+			return units, nil
 		}
+		// No rows from previous fetch — table is done.
+		s.offset = 0
+		s.currentTable++
+		s.stats.TablesDone++
+	}
 
-		// Open cursor for next table
+	// Advance to the next table that has data.
+	for s.currentTable < len(s.tables) {
 		table := s.tables[s.currentTable]
-		s.log.Debug("scanning table", "schema", table.Schema, "table", table.Name)
+		s.log.Debug("scanning table", "schema", table.Schema, "table", table.Name, "offset", s.offset)
 
-		// Get table columns and primary key
 		if err := s.getTableInfo(ctx, table); err != nil {
 			s.log.Debug("failed to get table info", "table", table.Name, "error", err)
 			s.currentTable++
 			s.stats.TablesDone++
+			s.offset = 0
 			continue
 		}
 
-		// Build query with cursor-based pagination
-		query := s.buildScanQuery(table)
+		query := s.buildPaginatedQuery(table, batchSize, s.offset)
 		rows, err := s.pool.Query(ctx, query)
 		if err != nil {
-			s.log.Debug("failed to open cursor for table", "table", table.Name, "error", err)
+			s.log.Debug("failed to query table", "table", table.Name, "error", err)
+			s.currentTable++
+			s.stats.TablesDone++
+			s.offset = 0
+			continue
+		}
+
+		units := make([]provider.MigrationUnit, 0, batchSize)
+		for rows.Next() {
+			unit, err := s.readRowDirect(ctx, table, rows)
+			if err != nil {
+				s.log.Debug("failed to read row, skipping",
+					"table", table.Name, "error", err)
+				continue
+			}
+			units = append(units, *unit)
+			s.stats.TotalScanned++
+			s.stats.TotalBytes += unit.Size
+		}
+		if err := rows.Err(); err != nil {
+			s.log.Debug("row error", "table", table.Name, "error", err)
+		}
+		rows.Close()
+
+		if len(units) == 0 {
+			// Table exhausted, move to next.
+			s.offset = 0
 			s.currentTable++
 			s.stats.TablesDone++
 			continue
 		}
-		s.rows = rows
+
+		s.offset += len(units)
+
+		// If we got a full batch, keep the table open for next call.
+		// Otherwise, the table is done.
+		if len(units) < batchSize {
+			s.offset = 0
+			s.currentTable++
+			s.stats.TablesDone++
+		}
+
+		return units, nil
 	}
 
-	if len(units) == 0 {
-		return nil, io.EOF
-	}
-
-	return units, nil
+	s.done = true
+	return nil, io.EOF
 }
 
 // Stats returns current scan statistics.
@@ -178,8 +207,8 @@ func (s *postgresScanner) Close() error {
 	if s.rows != nil {
 		s.rows.Close()
 		s.rows = nil
-		s.done = true
 	}
+	s.done = true
 	return nil
 }
 
@@ -221,7 +250,6 @@ func (s *postgresScanner) listTables(ctx context.Context) error {
 		}
 		s.tables = filtered
 		s.stats.TablesTotal = len(filtered)
-		// Adjust currentTable since we removed tables from the front.
 		if s.currentTable > len(s.tables) {
 			s.currentTable = len(s.tables)
 		}
@@ -299,47 +327,36 @@ func (s *postgresScanner) getTableInfo(ctx context.Context, table tableInfo) err
 	return nil
 }
 
-// buildScanQuery builds a SELECT query for scanning a table.
-func (s *postgresScanner) buildScanQuery(table tableInfo) string {
-	// Build column list
+// buildPaginatedQuery builds a SELECT query with LIMIT/OFFSET for a table.
+func (s *postgresScanner) buildPaginatedQuery(table tableInfo, limit, offset int) string {
 	colNames := make([]string, len(s.columns))
 	for i, col := range s.columns {
 		colNames[i] = quoteIdentifier(col.Name)
 	}
 
-	// Build ORDER BY using primary key columns
 	orderBy := make([]string, len(s.pkColumns))
 	for i, col := range s.pkColumns {
 		orderBy[i] = quoteIdentifier(col)
 	}
 
-	query := fmt.Sprintf(
-		"SELECT %s FROM %s.%s ORDER BY %s",
+	return fmt.Sprintf(
+		"SELECT %s FROM %s.%s ORDER BY %s LIMIT %d OFFSET %d",
 		strings.Join(colNames, ", "),
 		quoteIdentifier(table.Schema),
 		quoteIdentifier(table.Name),
 		strings.Join(orderBy, ", "),
+		limit, offset,
 	)
-
-	return query
 }
 
-// readRow reads a single row and returns it as a MigrationUnit.
-func (s *postgresScanner) readRow(ctx context.Context) (*provider.MigrationUnit, error) {
-	table := s.tables[s.currentTable]
-
-	// Scan row values
-	values := make([]any, len(s.columns))
-	valuePtrs := make([]any, len(s.columns))
-	for i := range values {
-		valuePtrs[i] = &values[i]
-	}
-
-	if err := s.rows.Scan(valuePtrs...); err != nil {
+// readRowDirect reads a single row from the given pgx.Rows and returns it
+// as a MigrationUnit. Used by the LIMIT/OFFSET scan path.
+func (s *postgresScanner) readRowDirect(_ context.Context, table tableInfo, rows pgx.Rows) (*provider.MigrationUnit, error) {
+	values, err := rows.Values()
+	if err != nil {
 		return nil, err
 	}
 
-	// Build data map and extract primary key
 	data := make(map[string]any)
 	pk := make(map[string]any)
 	columnTypes := make(map[string]string)
@@ -349,7 +366,6 @@ func (s *postgresScanner) readRow(ctx context.Context) (*provider.MigrationUnit,
 		data[col.Name] = val
 		columnTypes[col.Name] = col.Type
 
-		// Check if this column is part of the primary key
 		for _, pkCol := range s.pkColumns {
 			if col.Name == pkCol {
 				pk[col.Name] = val
@@ -358,7 +374,6 @@ func (s *postgresScanner) readRow(ctx context.Context) (*provider.MigrationUnit,
 		}
 	}
 
-	// Create the row envelope
 	row := &postgresRow{
 		Table:       table.Name,
 		Schema:      table.Schema,
@@ -367,16 +382,12 @@ func (s *postgresScanner) readRow(ctx context.Context) (*provider.MigrationUnit,
 		ColumnTypes: columnTypes,
 	}
 
-	// Encode to JSON for the MigrationUnit
 	rowData, err := encodePostgresRow(row)
 	if err != nil {
 		return nil, err
 	}
 
-	// Create row key
 	key := buildRowKey(table.Schema, table.Name, pk)
-
-	// Estimate size
 	size := int64(len(rowData))
 
 	return &provider.MigrationUnit{
@@ -391,6 +402,13 @@ func (s *postgresScanner) readRow(ctx context.Context) (*provider.MigrationUnit,
 		},
 		Size: size,
 	}, nil
+}
+
+// readRow reads a single row from s.rows and returns it as a MigrationUnit.
+// Used by the leftover-rows drain path.
+func (s *postgresScanner) readRow(ctx context.Context) (*provider.MigrationUnit, error) {
+	table := s.tables[s.currentTable]
+	return s.readRowDirect(ctx, table, s.rows)
 }
 
 // quoteIdentifier quotes a PostgreSQL identifier.

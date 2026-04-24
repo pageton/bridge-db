@@ -493,7 +493,7 @@ func TestCanonicalizeMongoValue_NestedMap(t *testing.T) {
 func TestBuildMongoDBURI_Basic(t *testing.T) {
 	cfg := &config.MongoDBConfig{
 		Host:     "localhost",
-		Port:     27017,
+		Port:     config.IntPtr(27017),
 		Database: "mydb",
 	}
 
@@ -506,7 +506,7 @@ func TestBuildMongoDBURI_Basic(t *testing.T) {
 func TestBuildMongoDBURI_WithAuth(t *testing.T) {
 	cfg := &config.MongoDBConfig{
 		Host:     "db.example.com",
-		Port:     27017,
+		Port:     config.IntPtr(27017),
 		Username: "admin",
 		Password: "s3cret",
 		Database: "app",
@@ -521,7 +521,7 @@ func TestBuildMongoDBURI_WithAuth(t *testing.T) {
 func TestBuildMongoDBURI_NonAdminAuthSource(t *testing.T) {
 	cfg := &config.MongoDBConfig{
 		Host:       "localhost",
-		Port:       27017,
+		Port:       config.IntPtr(27017),
 		Database:   "testdb",
 		AuthSource: "customAuth",
 	}
@@ -535,7 +535,7 @@ func TestBuildMongoDBURI_NonAdminAuthSource(t *testing.T) {
 func TestBuildMongoDBURI_AdminAuthSourceOmitted(t *testing.T) {
 	cfg := &config.MongoDBConfig{
 		Host:       "localhost",
-		Port:       27017,
+		Port:       config.IntPtr(27017),
 		Database:   "testdb",
 		AuthSource: "admin",
 	}
@@ -552,9 +552,9 @@ func TestBuildMongoDBURI_AdminAuthSourceOmitted(t *testing.T) {
 func TestBuildMongoDBURI_WithTLS(t *testing.T) {
 	cfg := &config.MongoDBConfig{
 		Host:     "localhost",
-		Port:     27017,
+		Port:     config.IntPtr(27017),
 		Database: "mydb",
-		TLS:      true,
+		TLS:      config.BoolPtr(true),
 	}
 
 	uri := buildMongoDBURI(cfg)
@@ -566,10 +566,10 @@ func TestBuildMongoDBURI_WithTLS(t *testing.T) {
 func TestBuildMongoDBURI_WithTLSAndAuthSource(t *testing.T) {
 	cfg := &config.MongoDBConfig{
 		Host:       "localhost",
-		Port:       27017,
+		Port:       config.IntPtr(27017),
 		Database:   "mydb",
 		AuthSource: "custom",
-		TLS:        true,
+		TLS:        config.BoolPtr(true),
 	}
 
 	uri := buildMongoDBURI(cfg)
@@ -587,7 +587,7 @@ func TestBuildMongoDBURI_WithTLSAndAuthSource(t *testing.T) {
 func TestBuildMongoDBURI_NoDatabase(t *testing.T) {
 	cfg := &config.MongoDBConfig{
 		Host: "localhost",
-		Port: 27017,
+		Port: config.IntPtr(27017),
 	}
 
 	uri := buildMongoDBURI(cfg)
@@ -599,7 +599,7 @@ func TestBuildMongoDBURI_NoDatabase(t *testing.T) {
 func TestBuildMongoDBURI_PasswordWithSpecialChars(t *testing.T) {
 	cfg := &config.MongoDBConfig{
 		Host:     "localhost",
-		Port:     27017,
+		Port:     config.IntPtr(27017),
 		Username: "user",
 		Password: "p@ss:w/rd",
 		Database: "db",

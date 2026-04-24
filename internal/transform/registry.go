@@ -30,9 +30,9 @@ func RegisterTransformer(srcProvider, dstProvider string, ctor func() Transforme
 
 // GetTransformer returns a transformer for the given pair, or a NoopTransformer
 // if no specific transformer is registered (same-database migration).
-// If the transformer implements ConfigurableTransformer, the global config is
-// injected automatically.
-func GetTransformer(srcProvider, dstProvider string) Transformer {
+// If the transformer implements ConfigurableTransformer, cfg is injected
+// automatically.
+func GetTransformer(srcProvider, dstProvider string, cfg TransformerConfig) Transformer {
 	regMu.RLock()
 	ctor, ok := reg[pairKey{src: srcProvider, dst: dstProvider}]
 	regMu.RUnlock()
@@ -42,7 +42,7 @@ func GetTransformer(srcProvider, dstProvider string) Transformer {
 	}
 	t := ctor()
 	if ct, ok := t.(ConfigurableTransformer); ok {
-		ct.Configure(GlobalConfig())
+		ct.Configure(cfg)
 	}
 	return t
 }

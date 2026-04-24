@@ -120,21 +120,38 @@ func (bw *batchWriter) retryIndividual(
 ) {
 	log := logger.L().With("component", "batch-writer", "batch", bw.batchID)
 	recovered := 0
+	attempted := 0
+	maxUnits := bw.cfg.MaxPerUnitRetry
+	if maxUnits <= 0 {
+		return
+	}
 
 	for _, unit := range units {
 		if ctx.Err() != nil {
 			break
 		}
+		if attempted >= maxUnits {
+			key := unit.Key
+			if key == "" {
+				key = fmt.Sprintf("batch_%d_unit", bw.batchID)
+			}
+			out.unitErrors = append(out.unitErrors, unitError{
+				key: key,
+				err: fmt.Errorf("individual retry skipped after reaching limit (%d units)", maxUnits),
+			})
+			continue
+		}
+		attempted++
 
-		singleResult, err := bw.w.Write(ctx, []provider.MigrationUnit{unit})
-		if err != nil || singleResult.WrittenUnits == 0 {
+		singleResult, err := bw.writeSingleWithRetry(ctx, unit, log)
+		if err != nil || !isSuccessfulSingleWrite(singleResult) {
 			key := unit.Key
 			if key == "" {
 				key = fmt.Sprintf("batch_%d_unit", bw.batchID)
 			}
 			unitErr := err
 			if unitErr == nil {
-				unitErr = fmt.Errorf("write returned 0 units")
+				unitErr = fmt.Errorf("write did not report success")
 			}
 			out.unitErrors = append(out.unitErrors, unitError{
 				key: key,
@@ -144,7 +161,11 @@ func (bw *batchWriter) retryIndividual(
 		}
 
 		recovered++
-		batchResult.WrittenUnits++
+		if singleResult.WrittenUnits > 0 {
+			batchResult.WrittenUnits += singleResult.WrittenUnits
+		} else {
+			batchResult.SkippedUnits += max(singleResult.SkippedUnits, 1)
+		}
 		batchResult.FailedUnits--
 		batchResult.BytesWritten += singleResult.BytesWritten
 
@@ -160,14 +181,133 @@ func (bw *batchWriter) retryIndividual(
 	if recovered > 0 {
 		log.Debug("recovered failed units via individual retry",
 			"recovered", recovered,
-			"attempted", len(units),
+			"attempted", attempted,
 		)
 	}
+	if len(units) > attempted {
+		log.Warn("skipped individual retries beyond configured limit",
+			"failed_units", len(units),
+			"retried_units", attempted,
+			"retry_unit_limit", maxUnits,
+		)
+	}
+}
+
+func (bw *batchWriter) writeSingleWithRetry(
+	ctx context.Context,
+	unit provider.MigrationUnit,
+	log interface {
+		Debug(string, ...any)
+		Warn(string, ...any)
+	},
+) (*provider.BatchResult, error) {
+	var result *provider.BatchResult
+	key := unit.Key
+	if key == "" {
+		key = fmt.Sprintf("batch_%d_unit", bw.batchID)
+	}
+
+	retryCfg := retry.Config{
+		MaxAttempts:     bw.cfg.MaxRetries + 1,
+		InitialInterval: bw.cfg.RetryBackoff,
+		MaxInterval:     5 * time.Second,
+		Multiplier:      2.0,
+		Operation:       fmt.Sprintf("write unit %s", key),
+	}
+
+	attempt := 0
+	err := retry.Do(ctx, retryCfg, func() error {
+		attempt++
+		started := time.Now()
+		remaining := deadlineRemaining(ctx)
+		var werr error
+		result, werr = bw.w.Write(ctx, []provider.MigrationUnit{unit})
+		duration := time.Since(started)
+
+		fields := []any{
+			"key", key,
+			"attempt", attempt,
+			"duration", duration,
+			"deadline_remaining", remaining,
+		}
+		if result != nil {
+			fields = append(fields,
+				"written_units", result.WrittenUnits,
+				"failed_units", result.FailedUnits,
+			)
+		}
+
+		if werr != nil {
+			log.Warn("individual unit write attempt failed", append(fields, "error", werr)...)
+			return werr
+		}
+		if !isSuccessfulSingleWrite(result) {
+			diag := fmt.Errorf("write did not report success (written=%d, failed=%d)",
+				result.WrittenUnits, result.FailedUnits)
+			if len(result.Errors) > 0 {
+				diag = fmt.Errorf("write did not report success: %w", result.Errors[0])
+			}
+			log.Warn("individual unit write attempt did not report success", append(fields, "error", diag)...)
+			return diag
+		}
+		if result.WrittenUnits == 0 {
+			log.Debug("individual unit write attempt completed as no-op", fields...)
+			return nil
+		}
+
+		log.Debug("individual unit write attempt succeeded", fields...)
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func isSuccessfulSingleWrite(result *provider.BatchResult) bool {
+	if result == nil {
+		return false
+	}
+	if result.FailedUnits > 0 || len(result.FailedKeys) > 0 || len(result.Errors) > 0 {
+		return false
+	}
+	return result.WrittenUnits > 0 || result.SkippedUnits > 0 || result.TotalUnits == 0
+}
+
+func deadlineRemaining(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0
+	}
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // flush wraps the underlying writer's Flush.
 func (bw *batchWriter) flush(ctx context.Context) error {
 	return bw.w.Flush(ctx)
+}
+
+// ---------------------------------------------------------------------------
+// Per-unit retry resolution
+// ---------------------------------------------------------------------------
+
+// resolveMaxPerUnitRetry returns the effective per-unit retry limit.
+// If explicit > 0 it is used directly; otherwise a sensible default of
+// min(batchSize, 100) is computed so that most of a batch can be retried
+// individually without unbounded work.
+func resolveMaxPerUnitRetry(explicit, batchSize int) int {
+	if explicit > 0 {
+		return explicit
+	}
+	limit := batchSize
+	if limit > 100 {
+		limit = 100
+	}
+	return limit
 }
 
 // ---------------------------------------------------------------------------

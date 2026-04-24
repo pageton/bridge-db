@@ -89,6 +89,11 @@ func LoadFromEnv(prefix string) (*MigrationConfig, error) {
 	if v := getEnv("FK_HANDLING"); v != "" {
 		cfg.Pipeline.FKHandling = strings.ToLower(v)
 	}
+	if v := getEnv("MAX_PER_UNIT_RETRY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Pipeline.MaxPerUnitRetry = n
+		}
+	}
 
 	// Logging
 	if v := getEnv("LOG_LEVEL"); v != "" {
@@ -132,6 +137,11 @@ func LoadFromFileAndEnv(path, envPrefix string) (*MigrationConfig, error) {
 	}
 	if v := getEnv("DRY_RUN"); v != "" {
 		cfg.Pipeline.DryRun = isTruthy(v)
+	}
+	if v := getEnv("MAX_PER_UNIT_RETRY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Pipeline.MaxPerUnitRetry = n
+		}
 	}
 
 	// Re-resolve since URLs may have changed

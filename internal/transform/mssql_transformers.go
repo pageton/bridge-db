@@ -39,6 +39,14 @@ type mssqlPassthroughTransformer struct {
 }
 
 func (t *mssqlPassthroughTransformer) Transform(ctx context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
+	// NoSQL→SQL: convert Redis/MongoDB envelopes to SQL row envelopes first.
+	if t.src == "redis" && IsSQLProvider(t.dst) {
+		return RedisToSQL(units, sqlEnvelopeConfigForProvider(t.dst), &t.cfg)
+	}
+	if t.src == "mongodb" && IsSQLProvider(t.dst) {
+		return MongoDBToSQL(units, sqlEnvelopeConfigForProvider(t.dst), &t.cfg)
+	}
+
 	pipe := NewStagePipeline(
 		NullHandlingStage(&t.cfg),
 		FieldMappingStage(&t.cfg),
@@ -93,7 +101,8 @@ func mssqlSrcToDst(upper string, dst string) (string, bool) {
 	case "sqlite":
 		return mssqlToSQLiteType(upper)
 	case "redis", "mongodb":
-		return "", false
+		// NoSQL destinations are schema-free; source types are preserved as-is.
+		return upper, true
 	default:
 		return "", false
 	}
@@ -108,6 +117,7 @@ func dstToMSSQL(upper string, src string) (string, bool) {
 	case "sqlite":
 		return sqliteToMSSQLType(upper)
 	case "redis", "mongodb":
+		// NoSQL sources don't have SQL column types.
 		return "", false
 	default:
 		return "", false
@@ -230,7 +240,7 @@ func postgresToMSSQLType(upper string) (string, bool) {
 	case strings.HasPrefix(upper, "REAL") || strings.HasPrefix(upper, "DOUBLE PRECISION"):
 		return "FLOAT", true
 	case strings.HasPrefix(upper, "NUMERIC") || strings.HasPrefix(upper, "DECIMAL"):
-		return "DECIMAL", true
+		return upper, true
 	case strings.HasPrefix(upper, "CHARACTER VARYING") || strings.HasPrefix(upper, "VARCHAR"):
 		return "NVARCHAR(255)", true
 	case strings.HasPrefix(upper, "CHARACTER") || strings.HasPrefix(upper, "CHAR"):

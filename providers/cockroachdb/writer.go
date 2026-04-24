@@ -3,6 +3,7 @@ package cockroachdb
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,6 +66,11 @@ func (w *cockroachDBWriter) Write(ctx context.Context, units []provider.Migratio
 	for tableKey, rows := range tableRows {
 		if err := w.writeTable(ctx, tableKey, rows, &failedKeys, &errors); err != nil {
 			w.log.Debug("failed to write table", "table", tableKey, "error", err)
+			w.failed += int64(len(rows))
+			for _, row := range rows {
+				failedKeys = append(failedKeys, buildRowKey(row.Schema, row.Table, row.PrimaryKey))
+			}
+			errors = append(errors, fmt.Errorf("write table %s: %w", tableKey, err))
 		}
 	}
 
@@ -89,11 +95,40 @@ func (w *cockroachDBWriter) writeTable(ctx context.Context, tableKey string, row
 		return nil
 	}
 	schema, table := parseTableKey(tableKey)
-	firstRow := rows[0]
-	columns := make([]string, 0, len(firstRow.Data))
-	for col := range firstRow.Data {
+
+	// Compute the union of all columns across all rows in the batch.
+	colSet := make(map[string]string)
+	for _, row := range rows {
+		for col, typ := range row.ColumnTypes {
+			if _, exists := colSet[col]; !exists {
+				colSet[col] = typ
+			}
+		}
+		for col := range row.Data {
+			if _, exists := colSet[col]; !exists {
+				colSet[col] = "TEXT"
+			}
+		}
+	}
+	columns := make([]string, 0, len(colSet))
+	for col := range colSet {
 		columns = append(columns, col)
 	}
+	sort.Strings(columns)
+
+	// Build a merged row for table creation using the union column types.
+	mergedRow := cockroachDBRow{
+		Table:       rows[0].Table,
+		Schema:      rows[0].Schema,
+		PrimaryKey:  rows[0].PrimaryKey,
+		Data:        rows[0].Data,
+		ColumnTypes: colSet,
+	}
+
+	if err := w.ensureTableExists(ctx, schema, table, mergedRow, columns); err != nil {
+		return fmt.Errorf("ensure table exists: %w", err)
+	}
+
 	if w.opts.OnConflict == provider.ConflictSkip {
 		return w.writeWithSkip(ctx, schema, table, columns, rows, failedKeys, errors)
 	}
@@ -290,9 +325,136 @@ func (s *cockroachDBRowSource) Err() error {
 	return nil
 }
 
+func (w *cockroachDBWriter) ensureTableExists(ctx context.Context, schema, table string, row cockroachDBRow, columns []string) error {
+	stmts := w.buildCreateTableStatements(schema, table, row, columns)
+	for _, stmt := range stmts {
+		if _, err := w.pool.Exec(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return w.addMissingColumns(ctx, schema, table, columns, row)
+}
+
+func (w *cockroachDBWriter) addMissingColumns(ctx context.Context, schema, table string, columns []string, row cockroachDBRow) error {
+	rows, err := w.pool.Query(ctx,
+		"SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
+		schema, table)
+	if err != nil {
+		return nil // best-effort
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var colName string
+		if err := rows.Scan(&colName); err == nil {
+			existing[colName] = true
+		}
+	}
+	rows.Close()
+
+	for _, col := range columns {
+		if existing[col] {
+			continue
+		}
+		colType := "TEXT"
+		if mapped, ok := row.ColumnTypes[col]; ok && mapped != "" {
+			colType = normalizeCockroachDBColumnType(mapped)
+		}
+		alterStmt := fmt.Sprintf("ALTER TABLE %s.%s ADD COLUMN IF NOT EXISTS %s %s",
+			quoteIdentifier(schema), quoteIdentifier(table),
+			quoteIdentifier(col), colType)
+		if _, err := w.pool.Exec(ctx, alterStmt); err != nil {
+			return fmt.Errorf("add column %s: %w", col, err)
+		}
+	}
+	return nil
+}
+
+func (w *cockroachDBWriter) buildCreateTableStatements(schema, table string, row cockroachDBRow, columns []string) []string {
+	stmts := []string{
+		fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quoteIdentifier(schema)),
+	}
+
+	defs := make([]string, 0, len(columns)+1)
+	for _, col := range columns {
+		colType := "TEXT"
+		if mapped, ok := row.ColumnTypes[col]; ok && mapped != "" {
+			colType = normalizeCockroachDBColumnType(mapped)
+		}
+		defs = append(defs, fmt.Sprintf("%s %s", quoteIdentifier(col), colType))
+	}
+
+	if len(row.PrimaryKey) > 0 {
+		pkCols := make([]string, 0, len(row.PrimaryKey))
+		for col := range row.PrimaryKey {
+			pkCols = append(pkCols, quoteIdentifier(col))
+		}
+		sort.Strings(pkCols)
+		defs = append(defs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(pkCols, ", ")))
+	}
+
+	stmts = append(stmts, fmt.Sprintf(
+		"CREATE TABLE IF NOT EXISTS %s.%s (\n  %s\n)",
+		quoteIdentifier(schema),
+		quoteIdentifier(table),
+		strings.Join(defs, ",\n  "),
+	))
+
+	return stmts
+}
+
+// normalizeCockroachDBColumnType maps generic column types to CockroachDB-compatible types.
+func normalizeCockroachDBColumnType(colType string) string {
+	upper := strings.ToUpper(strings.TrimSpace(colType))
+	switch {
+	case upper == "":
+		return "TEXT"
+	case strings.HasPrefix(upper, "INT"):
+		return "INT"
+	case strings.HasPrefix(upper, "BIGINT"):
+		return "BIGINT"
+	case strings.HasPrefix(upper, "SMALLINT"):
+		return "SMALLINT"
+	case strings.HasPrefix(upper, "TINYINT"):
+		return "SMALLINT"
+	case strings.HasPrefix(upper, "FLOAT"):
+		return "FLOAT4"
+	case strings.HasPrefix(upper, "DOUBLE"):
+		return "FLOAT8"
+	case strings.HasPrefix(upper, "REAL"):
+		return "FLOAT4"
+	case strings.HasPrefix(upper, "DECIMAL") || strings.HasPrefix(upper, "NUMERIC"):
+		return "DECIMAL"
+	case strings.HasPrefix(upper, "VARCHAR"):
+		return "STRING"
+	case strings.HasPrefix(upper, "CHAR"):
+		return "STRING"
+	case strings.HasPrefix(upper, "TEXT"):
+		return "STRING"
+	case strings.HasPrefix(upper, "JSON"):
+		return "JSONB"
+	case strings.HasPrefix(upper, "BLOB") || strings.HasPrefix(upper, "BYTEA") || strings.HasPrefix(upper, "BINARY"):
+		return "BYTES"
+	case strings.HasPrefix(upper, "DATETIME") || strings.HasPrefix(upper, "TIMESTAMPTZ"):
+		return "TIMESTAMPTZ"
+	case strings.HasPrefix(upper, "TIMESTAMP"):
+		return "TIMESTAMP"
+	case upper == "DATE":
+		return "DATE"
+	case upper == "TIME":
+		return "TIME"
+	case strings.HasPrefix(upper, "BOOL"):
+		return "BOOL"
+	default:
+		return colType
+	}
+}
+
 func parseTableKey(key string) (schema, table string) {
 	parts := strings.SplitN(key, ".", 2)
 	if len(parts) == 2 {
+		if parts[0] == "" {
+			return "public", parts[1]
+		}
 		return parts[0], parts[1]
 	}
 	return "public", key

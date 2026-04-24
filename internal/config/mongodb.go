@@ -9,26 +9,27 @@ import (
 // MongoDBConfig holds MongoDB-specific connection parameters.
 type MongoDBConfig struct {
 	Host       string `yaml:"host" json:"host"`
-	Port       int    `yaml:"port" json:"port"`
+	Port       *int   `yaml:"port" json:"port"`
 	Username   string `yaml:"username" json:"username"`
 	Password   string `yaml:"password" json:"password"`
 	Database   string `yaml:"database" json:"database"`
 	AuthSource string `yaml:"auth_source" json:"auth_source"`
-	TLS        bool   `yaml:"tls" json:"tls"`
+	TLS        *bool  `yaml:"tls" json:"tls"`
 }
 
 // DefaultMongoDBConfig returns a MongoDBConfig with sensible defaults.
 func DefaultMongoDBConfig() MongoDBConfig {
 	return MongoDBConfig{
 		Host:       "127.0.0.1",
-		Port:       27017,
+		Port:       IntPtr(27017),
 		AuthSource: "admin",
+		TLS:        BoolPtr(false),
 	}
 }
 
 // Address returns the host:port string.
 func (c MongoDBConfig) Address() string {
-	return fmt.Sprintf("%s:%d", c.Host, c.Port)
+	return fmt.Sprintf("%s:%d", c.Host, c.GetPort())
 }
 
 // ParseMongoDBURL parses a mongodb:// URL into a MongoDBConfig.
@@ -52,7 +53,7 @@ func ParseMongoDBURL(rawURL string) (MongoDBConfig, error) {
 		}
 		if portStr := u.Port(); portStr != "" {
 			if p, err := strconv.Atoi(portStr); err == nil {
-				cfg.Port = p
+				cfg.Port = IntPtr(p)
 			}
 		}
 	}
@@ -74,7 +75,10 @@ func ParseMongoDBURL(rawURL string) (MongoDBConfig, error) {
 		cfg.AuthSource = authSrc
 	}
 	if tlsVal := u.Query().Get("tls"); tlsVal == "true" || tlsVal == "1" {
-		cfg.TLS = true
+		cfg.TLS = BoolPtr(true)
+	}
+	if tlsVal := u.Query().Get("tls"); tlsVal == "false" || tlsVal == "0" {
+		cfg.TLS = BoolPtr(false)
 	}
 
 	return cfg, nil
@@ -85,7 +89,7 @@ func (c MongoDBConfig) Validate() error {
 	if c.Host == "" {
 		return fmt.Errorf("mongodb host is required")
 	}
-	if c.Port <= 0 || c.Port > 65535 {
+	if c.GetPort() <= 0 || c.GetPort() > 65535 {
 		return fmt.Errorf("mongodb port must be between 1 and 65535")
 	}
 	if c.Database == "" {
@@ -94,6 +98,17 @@ func (c MongoDBConfig) Validate() error {
 	return nil
 }
 
-func (c MongoDBConfig) GetHost() string     { return c.Host }
-func (c MongoDBConfig) GetPort() int        { return c.Port }
+func (c MongoDBConfig) GetHost() string { return c.Host }
+func (c MongoDBConfig) GetPort() int {
+	if c.Port == nil {
+		return 0
+	}
+	return *c.Port
+}
+func (c MongoDBConfig) GetTLS() bool {
+	if c.TLS == nil {
+		return false
+	}
+	return *c.TLS
+}
 func (c MongoDBConfig) GetDatabase() string { return c.Database }

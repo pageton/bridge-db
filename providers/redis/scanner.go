@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pageton/bridge-db/internal/logger"
+	"github.com/pageton/bridge-db/internal/util"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
@@ -22,18 +23,23 @@ type redisScanner struct {
 	stats     provider.ScanStats
 	cursor    uint64
 	done      bool
-	processed map[string]struct{}
-	log       interface {
+	processed *util.BloomFilter
+	// processedExact is used only when resuming from a checkpoint to handle
+	// the keys listed in the resume token with zero false positives. It is
+	// populated once during init and never grows during scanning.
+	processedExact map[string]struct{}
+	log            interface {
 		Debug(msg string, args ...any)
 	}
 }
 
 func newRedisScanner(client *redis.Client, opts provider.ScanOptions) *redisScanner {
 	s := &redisScanner{
-		client:    client,
-		opts:      opts,
-		processed: make(map[string]struct{}),
-		log:       logger.L().With("component", "redis-scanner"),
+		client:         client,
+		opts:           opts,
+		processed:      util.NewBloomFilter(1_000_000, 0.01),
+		processedExact: make(map[string]struct{}),
+		log:            logger.L().With("component", "redis-scanner"),
 	}
 
 	if len(opts.ResumeToken) > 0 {
@@ -41,11 +47,14 @@ func newRedisScanner(client *redis.Client, opts provider.ScanOptions) *redisScan
 		if err := sonic.Unmarshal(opts.ResumeToken, &token); err == nil {
 			s.stats.TotalScanned = token.TotalScanned
 			s.stats.TotalBytes = token.TotalBytes
+			// Add resumed keys to the bloom filter. For exact dedup during
+			// resume, also populate processedExact with the same keys.
 			for _, k := range token.ProcessedKeys {
-				s.processed[k] = struct{}{}
+				s.processed.Add(k)
+				s.processedExact[k] = struct{}{}
 			}
 			s.log.Debug("resuming from checkpoint",
-				"already_processed", len(s.processed),
+				"already_processed", len(token.ProcessedKeys),
 				"total_scanned", token.TotalScanned,
 			)
 		}
@@ -93,8 +102,16 @@ func (s *redisScanner) Next(ctx context.Context) ([]provider.MigrationUnit, erro
 	// Read each key: type, value, TTL
 	units := make([]provider.MigrationUnit, 0, len(keys))
 	for _, key := range keys {
-		if _, skip := s.processed[key]; skip {
-			continue
+		if s.processed.MightContain(key) {
+			// Bloom filter says "maybe seen" — check exact set (populated
+			// only on resume from checkpoint) to avoid false-positive skips
+			// during a fresh scan. During a fresh scan processedExact is
+			// empty, so MightContain false positives just cause redundant
+			// reads (harmless). During resume, processedExact has the exact
+			// keys from the checkpoint, so we can skip confidently.
+			if _, exact := s.processedExact[key]; exact {
+				continue
+			}
 		}
 
 		unit, err := s.readKey(ctx, key)
@@ -103,7 +120,7 @@ func (s *redisScanner) Next(ctx context.Context) ([]provider.MigrationUnit, erro
 			continue
 		}
 		units = append(units, *unit)
-		s.processed[key] = struct{}{}
+		s.processed.Add(key)
 		s.stats.TotalScanned++
 		s.stats.TotalBytes += unit.Size
 	}

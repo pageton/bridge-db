@@ -74,7 +74,7 @@ func TestMySQLToPostgres_AddsSchemaField(t *testing.T) {
 }
 
 func TestMongoDBToPostgres_AddsPublicSchema(t *testing.T) {
-	tr := GetTransformer("mongodb", "postgres")
+	tr := GetTransformer("mongodb", "postgres", TransformerConfig{})
 
 	env := map[string]any{
 		"collection": "users",
@@ -140,7 +140,7 @@ func TestMongoDBToPostgres_AddsPublicSchema(t *testing.T) {
 }
 
 func TestMySQLToCockroachDB_AddsPublicSchema(t *testing.T) {
-	tr := GetTransformer("mysql", "cockroachdb")
+	tr := GetTransformer("mysql", "cockroachdb", TransformerConfig{})
 	data := mysqlRowEnvelope("orders", map[string]any{"id": 1.0}, map[string]any{"status": "open"}, map[string]any{"status": "varchar(50)"})
 	units := []provider.MigrationUnit{{Key: "orders:1", Data: data}}
 
@@ -159,7 +159,7 @@ func TestMySQLToCockroachDB_AddsPublicSchema(t *testing.T) {
 }
 
 func TestMongoDBToCockroachDB_AddsPublicSchema(t *testing.T) {
-	tr := GetTransformer("mongodb", "cockroachdb")
+	tr := GetTransformer("mongodb", "cockroachdb", TransformerConfig{})
 
 	env := map[string]any{
 		"collection": "users",

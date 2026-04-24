@@ -75,9 +75,9 @@ func (p *RedisProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 		Addr:     cfg.Address(),
 		Username: cfg.Username,
 		Password: cfg.Password,
-		DB:       cfg.DB,
+		DB:       cfg.GetDB(),
 	}
-	if cfg.TLS {
+	if cfg.GetTLS() {
 		opts.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
@@ -86,11 +86,11 @@ func (p *RedisProvider) Connect(_ context.Context, srcConfig, dstConfig any) err
 	p.client = redis.NewClient(opts)
 
 	log := logger.L().With("provider", "redis", "role", p.role)
-	if !cfg.TLS && cfg.Host != "127.0.0.1" && cfg.Host != "localhost" {
+	if !cfg.GetTLS() && cfg.Host != "127.0.0.1" && cfg.Host != "localhost" {
 		log.Warn("redis connection is unencrypted — consider enabling TLS for non-local hosts",
 			"addr", cfg.Address())
 	}
-	log.Debug("configured redis client", "addr", cfg.Address(), "db", cfg.DB)
+	log.Debug("configured redis client", "addr", cfg.Address(), "db", cfg.GetDB())
 
 	return nil
 }
@@ -377,7 +377,7 @@ func redisConfigFromMap(m map[string]string) (*config.RedisConfig, error) {
 
 	cfg := config.DefaultRedisConfig()
 	cfg.Host = host
-	cfg.Port = port
+	cfg.Port = config.IntPtr(port)
 
 	return &cfg, nil
 }

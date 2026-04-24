@@ -109,6 +109,8 @@ func (m cockroachDBTypeMapper) MapType(colType string) (string, bool) {
 			return mariadbToPostgresType(upper)
 		case "postgres":
 			return postgresToCockroachType(upper)
+		case "sqlite":
+			return SQLiteToPostgresTypeMapper{}.MapType(colType)
 		default:
 			return "", false
 		}
@@ -119,7 +121,8 @@ func (m cockroachDBTypeMapper) MapType(colType string) (string, bool) {
 	case "sqlite":
 		return cockroachDBToSQLiteType(upper)
 	case "redis", "mongodb":
-		return "", false
+		// NoSQL destinations are schema-free; source types are preserved as-is.
+		return colType, true
 	default:
 		return "", false
 	}
@@ -144,21 +147,27 @@ func cockroachDBToPostgresType(upper string) (string, bool) {
 	}
 
 	typeMap := map[string]string{
-		"SMALLINT": "SMALLINT",
-		"INTEGER":  "INTEGER",
-		"INT":      "INTEGER",
-		"BIGINT":   "BIGINT",
-		"REAL":     "REAL",
-		"DOUBLE":   "DOUBLE PRECISION",
-		"BOOLEAN":  "BOOLEAN",
-		"BOOL":     "BOOLEAN",
-		"DATE":     "DATE",
-		"TIME":     "TIME",
-		"TEXT":     "TEXT",
-		"BYTEA":    "BYTEA",
-		"JSON":     "JSONB",
-		"JSONB":    "JSONB",
-		"UUID":     "UUID",
+		"SMALLINT":         "SMALLINT",
+		"INTEGER":          "INTEGER",
+		"INT":              "INTEGER",
+		"BIGINT":           "BIGINT",
+		"REAL":             "REAL",
+		"DOUBLE":           "DOUBLE PRECISION",
+		"DOUBLE PRECISION": "DOUBLE PRECISION",
+		"FLOAT8":           "DOUBLE PRECISION",
+		"FLOAT4":           "REAL",
+		"BOOLEAN":          "BOOLEAN",
+		"BOOL":             "BOOLEAN",
+		"DATE":             "DATE",
+		"TIME":             "TIME",
+		"TEXT":             "TEXT",
+		"STRING":           "TEXT",
+		"BYTEA":            "BYTEA",
+		"BYTES":            "BYTEA",
+		"JSON":             "JSONB",
+		"JSONB":            "JSONB",
+		"UUID":             "UUID",
+		"TIMESTAMPTZ":      "TIMESTAMPTZ",
 	}
 
 	if mapped, ok := typeMap[upper]; ok {
@@ -176,16 +185,48 @@ func postgresToCockroachType(upper string) (string, bool) {
 		return "SMALLINT", true
 	case strings.HasPrefix(upper, "SERIAL"):
 		return "INT", true
+	case strings.HasPrefix(upper, "SMALLINT"):
+		return "SMALLINT", true
+	case upper == "INT2":
+		return "SMALLINT", true
+	case upper == "INT8":
+		return "BIGINT", true
+	case strings.HasPrefix(upper, "BIGINT"):
+		return "BIGINT", true
+	case strings.HasPrefix(upper, "INTEGER") || strings.HasPrefix(upper, "INT"):
+		return "INT", true
+	case strings.HasPrefix(upper, "REAL"):
+		return "FLOAT4", true
+	case strings.HasPrefix(upper, "DOUBLE PRECISION") || strings.HasPrefix(upper, "DOUBLE"):
+		return "FLOAT8", true
+	case strings.HasPrefix(upper, "NUMERIC") || strings.HasPrefix(upper, "DECIMAL"):
+		return "DECIMAL", true
 	case strings.HasPrefix(upper, "CHARACTER VARYING"):
 		return "STRING", true
 	case strings.HasPrefix(upper, "CHARACTER"):
+		return "STRING", true
+	case strings.HasPrefix(upper, "VARCHAR"):
+		return "STRING", true
+	case strings.HasPrefix(upper, "TEXT"):
 		return "STRING", true
 	case strings.HasPrefix(upper, "TIMESTAMP WITH TIME ZONE"):
 		return "TIMESTAMPTZ", true
 	case strings.HasPrefix(upper, "TIMESTAMP WITHOUT TIME ZONE"):
 		return "TIMESTAMP", true
+	case strings.HasPrefix(upper, "TIMESTAMP"):
+		return "TIMESTAMP", true
+	case strings.HasPrefix(upper, "DATE"):
+		return "DATE", true
+	case strings.HasPrefix(upper, "TIME"):
+		return "TIME", true
+	case strings.HasPrefix(upper, "BOOLEAN") || strings.HasPrefix(upper, "BOOL"):
+		return "BOOL", true
 	case strings.HasPrefix(upper, "JSONB"):
 		return "JSONB", true
+	case strings.HasPrefix(upper, "JSON"):
+		return "JSONB", true
+	case strings.HasPrefix(upper, "UUID"):
+		return "UUID", true
 	default:
 		return "", false
 	}
@@ -199,11 +240,19 @@ func cockroachDBToMySQLType(upper string) (string, bool) {
 		return "SMALLINT", true
 	case strings.HasPrefix(upper, "SMALLINT"):
 		return "SMALLINT", true
-	case strings.HasPrefix(upper, "INTEGER") || strings.HasPrefix(upper, "INT"):
-		return "INT", true
+	case upper == "INT2":
+		return "SMALLINT", true
+	case upper == "INT8":
+		return "BIGINT", true
 	case strings.HasPrefix(upper, "BIGINT"):
 		return "BIGINT", true
+	case strings.HasPrefix(upper, "INTEGER") || strings.HasPrefix(upper, "INT"):
+		return "INT", true
 	case strings.HasPrefix(upper, "REAL") || strings.HasPrefix(upper, "DOUBLE PRECISION"):
+		return "DOUBLE", true
+	case strings.HasPrefix(upper, "FLOAT4"):
+		return "FLOAT", true
+	case strings.HasPrefix(upper, "FLOAT8"):
 		return "DOUBLE", true
 	case strings.HasPrefix(upper, "NUMERIC") || strings.HasPrefix(upper, "DECIMAL"):
 		return "DECIMAL", true
@@ -211,9 +260,9 @@ func cockroachDBToMySQLType(upper string) (string, bool) {
 		return "VARCHAR(255)", true
 	case strings.HasPrefix(upper, "CHARACTER") || strings.HasPrefix(upper, "CHAR"):
 		return "CHAR(255)", true
-	case strings.HasPrefix(upper, "TEXT"):
+	case strings.HasPrefix(upper, "STRING") || strings.HasPrefix(upper, "TEXT"):
 		return "LONGTEXT", true
-	case strings.HasPrefix(upper, "BYTEA"):
+	case strings.HasPrefix(upper, "BYTES") || strings.HasPrefix(upper, "BYTEA"):
 		return "LONGBLOB", true
 	case strings.HasPrefix(upper, "TIMESTAMP"):
 		return "DATETIME", true
@@ -239,10 +288,14 @@ func cockroachDBToSQLiteType(upper string) (string, bool) {
 		return "SMALLINT", true
 	case strings.HasPrefix(upper, "SMALLINT"):
 		return "SMALLINT", true
-	case strings.HasPrefix(upper, "INTEGER") || strings.HasPrefix(upper, "INT"):
-		return "INTEGER", true
+	case upper == "INT2":
+		return "SMALLINT", true
+	case upper == "INT8":
+		return "BIGINT", true
 	case strings.HasPrefix(upper, "BIGINT"):
 		return "BIGINT", true
+	case strings.HasPrefix(upper, "INTEGER") || strings.HasPrefix(upper, "INT"):
+		return "INTEGER", true
 	case strings.HasPrefix(upper, "REAL") || strings.HasPrefix(upper, "DOUBLE PRECISION"):
 		return "REAL", true
 	case strings.HasPrefix(upper, "NUMERIC") || strings.HasPrefix(upper, "DECIMAL"):
@@ -251,7 +304,7 @@ func cockroachDBToSQLiteType(upper string) (string, bool) {
 		strings.HasPrefix(upper, "CHARACTER") || strings.HasPrefix(upper, "CHAR") ||
 		strings.HasPrefix(upper, "TEXT"):
 		return "TEXT", true
-	case strings.HasPrefix(upper, "BYTEA"):
+	case strings.HasPrefix(upper, "BYTES") || strings.HasPrefix(upper, "BYTEA"):
 		return "BLOB", true
 	case strings.HasPrefix(upper, "TIMESTAMP"):
 		return "TEXT", true

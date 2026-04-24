@@ -242,3 +242,4 @@ jobs:
             dist/${{ env.APP_NAME }}_*_darwin_arm64
             dist/${{ env.APP_NAME }}_*_windows_amd64.exe
             dist/checksums.txt
+            docs/logo.png

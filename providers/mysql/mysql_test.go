@@ -434,7 +434,7 @@ func TestParseRowKey_EmptyTable(t *testing.T) {
 func TestBuildMySQLDSN_ContainsRequiredParams(t *testing.T) {
 	cfg := &config.MySQLConfig{
 		Host:     "localhost",
-		Port:     3306,
+		Port:     config.IntPtr(3306),
 		Username: "root",
 		Password: "secret",
 		Database: "mydb",
@@ -462,7 +462,7 @@ func TestBuildMySQLDSN_ContainsRequiredParams(t *testing.T) {
 func TestBuildMySQLDSN_QueryParamsAfterDSNBase(t *testing.T) {
 	cfg := &config.MySQLConfig{
 		Host:     "10.0.0.1",
-		Port:     3307,
+		Port:     config.IntPtr(3307),
 		Username: "admin",
 		Password: "pass",
 		Database: "production",

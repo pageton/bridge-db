@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -62,7 +63,11 @@ func (w *sqliteWriter) Write(ctx context.Context, units []provider.MigrationUnit
 
 	for table, rows := range tableRows {
 		if err := w.writeTable(ctx, table, rows, &failedKeys, &errors); err != nil {
-			w.log.Debug("failed to write table", "table", table, "error", err)
+			w.failed += int64(len(rows))
+			for _, row := range rows {
+				failedKeys = append(failedKeys, buildRowKey(table, row.PrimaryKey))
+			}
+			errors = append(errors, fmt.Errorf("write table %s: %w", table, err))
 		}
 	}
 
@@ -87,13 +92,27 @@ func (w *sqliteWriter) writeTable(ctx context.Context, table string, rows []sqli
 		return nil
 	}
 
-	firstRow := rows[0]
-	columns := make([]string, 0, len(firstRow.Data))
-	for col := range firstRow.Data {
+	// Compute the union of all columns across all rows in the batch.
+	colSet := make(map[string]string)
+	for _, row := range rows {
+		for col, typ := range row.ColumnTypes {
+			if _, exists := colSet[col]; !exists {
+				colSet[col] = typ
+			}
+		}
+		for col := range row.Data {
+			if _, exists := colSet[col]; !exists {
+				colSet[col] = "TEXT"
+			}
+		}
+	}
+	columns := make([]string, 0, len(colSet))
+	for col := range colSet {
 		columns = append(columns, col)
 	}
+	sort.Strings(columns)
 
-	if err := w.ensureTable(ctx, table, firstRow); err != nil {
+	if err := w.ensureTable(ctx, table, colSet); err != nil {
 		return fmt.Errorf("ensure table %s: %w", table, err)
 	}
 
@@ -104,35 +123,79 @@ func (w *sqliteWriter) writeTable(ctx context.Context, table string, rows []sqli
 	return w.writeWithUpsert(ctx, table, columns, rows, failedKeys, errors)
 }
 
-func (w *sqliteWriter) ensureTable(ctx context.Context, table string, sampleRow sqliteRow) error {
+func (w *sqliteWriter) ensureTable(ctx context.Context, table string, colTypes map[string]string) error {
 	var count int
 	err := w.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&count)
 	if err != nil {
 		return err
 	}
-	if count > 0 {
+
+	if count == 0 {
+		colDefs := make([]string, 0, len(colTypes)+1)
+		colDefs = append(colDefs, "\"_rowid\" INTEGER PRIMARY KEY AUTOINCREMENT")
+		for col, colType := range colTypes {
+			if colType == "" {
+				colType = "TEXT"
+			}
+			colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col), colType))
+		}
+
+		query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)",
+			quoteIdentifier(table), strings.Join(colDefs, ",\n  "))
+
+		if _, err := w.db.ExecContext(ctx, query); err != nil {
+			return err
+		}
+		w.log.Debug("auto-created table", "table", table)
 		return nil
 	}
 
-	colDefs := make([]string, 0, len(sampleRow.Data)+1)
-	colDefs = append(colDefs, "\"_rowid\" INTEGER PRIMARY KEY AUTOINCREMENT")
-	for col, colType := range sampleRow.ColumnTypes {
+	// Table already exists — add any missing columns for heterogeneous
+	// NoSQL sources where each batch may introduce new fields.
+	existing, err := w.existingColumns(ctx, table)
+	if err != nil {
+		return nil // best-effort
+	}
+	for col, colType := range colTypes {
+		if existing[col] {
+			continue
+		}
 		if colType == "" {
 			colType = "TEXT"
 		}
-		colDefs = append(colDefs, fmt.Sprintf("%s %s", quoteIdentifier(col), colType))
+		alterStmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+			quoteIdentifier(table), quoteIdentifier(col), colType)
+		if _, err := w.db.ExecContext(ctx, alterStmt); err != nil {
+			// SQLite doesn't have IF NOT EXISTS for ADD COLUMN; ignore
+			// duplicate column errors from concurrent writers.
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return fmt.Errorf("add column %s to %s: %w", col, table, err)
+			}
+		}
 	}
-
-	query := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)",
-		quoteIdentifier(table), strings.Join(colDefs, ",\n  "))
-
-	if _, err := w.db.ExecContext(ctx, query); err != nil {
-		return err
-	}
-
-	w.log.Debug("auto-created table", "table", table)
 	return nil
+}
+
+func (w *sqliteWriter) existingColumns(ctx context.Context, table string) (map[string]bool, error) {
+	rows, err := w.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", quoteIdentifier(table)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultVal sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultVal, &pk); err == nil {
+			existing[name] = true
+		}
+	}
+	return existing, nil
 }
 
 func (w *sqliteWriter) writeWithUpsert(ctx context.Context, table string, columns []string, rows []sqliteRow, failedKeys *[]string, errors *[]error) error {
@@ -153,13 +216,19 @@ func (w *sqliteWriter) writeWithUpsert(ctx context.Context, table string, column
 		buildPlaceholders(len(columns)),
 	)
 
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	for _, row := range rows {
 		args := make([]any, len(columns))
 		for i, col := range columns {
 			args[i] = row.Data[col]
 		}
 
-		if _, err := w.db.ExecContext(ctx, query, args...); err != nil {
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			w.failed++
 			key := buildRowKey(table, row.PrimaryKey)
 			*failedKeys = append(*failedKeys, key)
@@ -171,7 +240,7 @@ func (w *sqliteWriter) writeWithUpsert(ctx context.Context, table string, column
 		w.bytes += int64(len(row.Data))
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 func (w *sqliteWriter) writeWithSkip(ctx context.Context, table string, columns []string, rows []sqliteRow, failedKeys *[]string, errors *[]error) error {
@@ -187,13 +256,19 @@ func (w *sqliteWriter) writeWithSkip(ctx context.Context, table string, columns 
 		buildPlaceholders(len(columns)),
 	)
 
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	for _, row := range rows {
 		args := make([]any, len(columns))
 		for i, col := range columns {
 			args[i] = row.Data[col]
 		}
 
-		result, err := w.db.ExecContext(ctx, query, args...)
+		result, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {
 			w.failed++
 			key := buildRowKey(table, row.PrimaryKey)
@@ -211,7 +286,7 @@ func (w *sqliteWriter) writeWithSkip(ctx context.Context, table string, columns 
 		w.bytes += int64(len(row.Data))
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 func buildPlaceholders(count int) string {

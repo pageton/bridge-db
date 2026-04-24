@@ -15,6 +15,7 @@ coverage.html
 .env*
 .mcp.json
 .seed-data/
+docs/logo.png
 /bridge
 bridge.test
 *.test

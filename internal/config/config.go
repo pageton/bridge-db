@@ -204,22 +204,56 @@ func (c *ConnectionConfig) resolveMSSQL() error {
 }
 
 // ---------------------------------------------------------------------------
-// Merge helper: override non-zero fields from src into dst.
-// Works for any struct whose fields are string, int, or bool.
+// Pointer helpers — used for optional config fields
 // ---------------------------------------------------------------------------
 
-// mergeStruct copies every non-zero field from src into dst and returns the
-// result. It uses reflection so that adding a new config field requires no
-// additional merge logic — the zero-value check ("" for strings, 0 for ints,
-// false for bools) naturally matches the "only override when explicitly set"
-// semantics.
+// BoolPtr returns a pointer to the given bool value.
+func BoolPtr(b bool) *bool { return &b }
+
+// IntPtr returns a pointer to the given int value.
+func IntPtr(i int) *int { return &i }
+
+// StringPtr returns a pointer to the given string value.
+func StringPtr(s string) *string { return &s }
+
+// ---------------------------------------------------------------------------
+// Merge helper: override fields from src into dst.
+// ---------------------------------------------------------------------------
+
+// mergeStruct merges src into dst and returns the result.
+//
+// Presence semantics:
+//   - Pointer fields are presence-aware. A nil pointer means "not provided";
+//     a non-nil pointer means "explicitly provided", even if it points to a
+//     zero value like false, 0, or "".
+//   - Value fields preserve the historical behavior for compatibility: the Go
+//     zero value means "not provided" and is skipped.
+//
+// This design lets provider configs opt into explicit zero-value overrides by
+// using pointer fields for optional values without forcing a broader schema
+// change across the entire config surface.
 func mergeStruct[T any](dst, src T) T {
 	dstVal := reflect.ValueOf(&dst).Elem()
 	srcVal := reflect.ValueOf(&src).Elem()
 	for i := range srcVal.NumField() {
-		sf := srcVal.Field(i)
-		if !sf.IsZero() {
-			dstVal.Field(i).Set(sf)
+		srcField := srcVal.Field(i)
+		dstField := dstVal.Field(i)
+
+		switch srcField.Kind() {
+		case reflect.Ptr:
+			if !srcField.IsNil() {
+				cloned := reflect.New(srcField.Elem().Type())
+				cloned.Elem().Set(srcField.Elem())
+				dstField.Set(cloned)
+			}
+		case reflect.Map, reflect.Slice:
+			if !srcField.IsNil() {
+				dstField.Set(srcField)
+			}
+		default:
+			if !srcField.IsZero() {
+				dstField.Set(srcField)
+			}
 		}
 	}
 	return dst
@@ -273,7 +307,8 @@ type PipelineConfig struct {
 	MigrateSchema    bool                      `yaml:"migrate_schema" json:"migrate_schema"`
 	FKHandling       string                    `yaml:"fk_handling" json:"fk_handling"`
 	MaxRetries       int                       `yaml:"max_retries" json:"max_retries"`
-	RetryBackoff     time.Duration             `yaml:"retry_backoff" json:"retry_backoff"`
+	MaxPerUnitRetry  int                       `yaml:"max_per_unit_retry" json:"max_per_unit_retry"`
+	RetryBackoff     time.Duration             `yaml:"retry_backoff" json:"retrybackoff"`
 }
 
 // DefaultPipelineConfig returns a PipelineConfig with sensible defaults.
@@ -285,6 +320,7 @@ func DefaultPipelineConfig() PipelineConfig {
 		MigrateSchema:    true,
 		FKHandling:       "defer_constraints",
 		MaxRetries:       3,
+		MaxPerUnitRetry:  0, // 0 = auto-resolved to min(BatchSize, 100)
 		RetryBackoff:     500 * time.Millisecond,
 	}
 }
@@ -296,6 +332,9 @@ func (c PipelineConfig) Validate() error {
 	}
 	if c.MaxRetries < 0 {
 		return fmt.Errorf("max_retries must be non-negative")
+	}
+	if c.MaxPerUnitRetry < 0 {
+		return fmt.Errorf("max_per_unit_retry must be non-negative")
 	}
 	switch c.ConflictStrategy {
 	case provider.ConflictOverwrite, provider.ConflictSkip, provider.ConflictError:

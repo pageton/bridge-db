@@ -12,8 +12,8 @@ func TestParseMySQLURL_PlainHostPort(t *testing.T) {
 	if cfg.Host != "dbhost" {
 		t.Errorf("host = %q", cfg.Host)
 	}
-	if cfg.Port != 3307 {
-		t.Errorf("port = %d", cfg.Port)
+	if *cfg.Port != 3307 {
+		t.Errorf("port = %d", *cfg.Port)
 	}
 	if cfg.Username != "root" {
 		t.Errorf("username = %q", cfg.Username)
@@ -36,8 +36,8 @@ func TestParseMySQLURL_TCPInHost(t *testing.T) {
 	if cfg.Host != "dbhost" {
 		t.Errorf("host = %q", cfg.Host)
 	}
-	if cfg.Port != 3307 {
-		t.Errorf("port = %d", cfg.Port)
+	if *cfg.Port != 3307 {
+		t.Errorf("port = %d", *cfg.Port)
 	}
 	if cfg.Database != "mydb" {
 		t.Errorf("database = %q", cfg.Database)
@@ -52,8 +52,8 @@ func TestParseMySQLURL_UnixSocketInHost(t *testing.T) {
 	if cfg.Host != "localhost" {
 		t.Errorf("host = %q", cfg.Host)
 	}
-	if cfg.Port != 3306 {
-		t.Errorf("port = %d, want 3306", cfg.Port)
+	if *cfg.Port != 3306 {
+		t.Errorf("port = %d, want 3306", *cfg.Port)
 	}
 }
 
@@ -65,8 +65,8 @@ func TestParseMySQLURL_Minimal(t *testing.T) {
 	if cfg.Host != "dbhost" {
 		t.Errorf("host = %q", cfg.Host)
 	}
-	if cfg.Port != 3306 {
-		t.Errorf("port = %d", cfg.Port)
+	if *cfg.Port != 3306 {
+		t.Errorf("port = %d", *cfg.Port)
 	}
 }
 
@@ -83,11 +83,11 @@ func TestMySQLConfig_Validate(t *testing.T) {
 		cfg     MySQLConfig
 		wantErr bool
 	}{
-		{name: "valid tcp", cfg: MySQLConfig{Host: "localhost", Port: 3306, Database: "db"}},
-		{name: "empty host", cfg: MySQLConfig{Host: "", Port: 3306, Database: "db"}, wantErr: true},
-		{name: "bad port", cfg: MySQLConfig{Host: "localhost", Port: 99999, Database: "db"}, wantErr: true},
-		{name: "empty database", cfg: MySQLConfig{Host: "localhost", Port: 3306, Database: ""}, wantErr: true},
-		{name: "unix socket valid", cfg: MySQLConfig{Host: "/var/mysql.sock", Port: 0, Database: "db"}},
+		{name: "valid tcp", cfg: MySQLConfig{Host: "localhost", Port: IntPtr(3306), Database: "db"}},
+		{name: "empty host", cfg: MySQLConfig{Host: "", Port: IntPtr(3306), Database: "db"}, wantErr: true},
+		{name: "bad port", cfg: MySQLConfig{Host: "localhost", Port: IntPtr(99999), Database: "db"}, wantErr: true},
+		{name: "empty database", cfg: MySQLConfig{Host: "localhost", Port: IntPtr(3306), Database: ""}, wantErr: true},
+		{name: "unix socket valid", cfg: MySQLConfig{Host: "/var/mysql.sock", Port: IntPtr(0), Database: "db"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -100,21 +100,21 @@ func TestMySQLConfig_Validate(t *testing.T) {
 }
 
 func TestMySQLConfig_Address_TCP(t *testing.T) {
-	cfg := MySQLConfig{Host: "db.example.com", Port: 3306}
+	cfg := MySQLConfig{Host: "db.example.com", Port: IntPtr(3306)}
 	if got := cfg.Address(); got != "tcp(db.example.com:3306)" {
 		t.Errorf("Address() = %q", got)
 	}
 }
 
 func TestMySQLConfig_Address_UnixSocket(t *testing.T) {
-	cfg := MySQLConfig{Host: "/var/mysql.sock", Port: 0}
+	cfg := MySQLConfig{Host: "/var/mysql.sock", Port: IntPtr(0)}
 	if got := cfg.Address(); got != "unix(/var/mysql.sock)" {
 		t.Errorf("Address() = %q", got)
 	}
 }
 
 func TestMySQLConfig_DSN_TCP(t *testing.T) {
-	cfg := MySQLConfig{Host: "db", Port: 3306, Username: "u", Password: "p", Database: "d"}
+	cfg := MySQLConfig{Host: "db", Port: IntPtr(3306), Username: "u", Password: "p", Database: "d"}
 	dsn := cfg.DSN()
 	if dsn != "u:***@tcp(db:3306)/d" {
 		t.Errorf("DSN() = %q", dsn)
@@ -122,7 +122,7 @@ func TestMySQLConfig_DSN_TCP(t *testing.T) {
 }
 
 func TestMySQLConfig_DSN_UnixSocket(t *testing.T) {
-	cfg := MySQLConfig{Host: "/sock", Port: 0, Username: "u", Password: "p", Database: "d"}
+	cfg := MySQLConfig{Host: "/sock", Port: IntPtr(0), Username: "u", Password: "p", Database: "d"}
 	dsn := cfg.DSN()
 	if dsn != "u:***@unix(/sock)/d" {
 		t.Errorf("DSN() = %q", dsn)
@@ -130,7 +130,7 @@ func TestMySQLConfig_DSN_UnixSocket(t *testing.T) {
 }
 
 func TestMySQLConfig_DSNWithPassword(t *testing.T) {
-	cfg := MySQLConfig{Host: "db", Port: 3306, Username: "u", Password: "p", Database: "d"}
+	cfg := MySQLConfig{Host: "db", Port: IntPtr(3306), Username: "u", Password: "p", Database: "d"}
 	dsn := cfg.DSNWithPassword()
 	if dsn != "u:p@tcp(db:3306)/d" {
 		t.Errorf("DSNWithPassword() = %q", dsn)
@@ -138,7 +138,7 @@ func TestMySQLConfig_DSNWithPassword(t *testing.T) {
 }
 
 func TestMergeMySQL(t *testing.T) {
-	base := MySQLConfig{Host: "h1", Port: 3306, Username: "u1"}
+	base := MySQLConfig{Host: "h1", Port: IntPtr(3306), Username: "u1"}
 	override := MySQLConfig{Host: "h2", Database: "d2"}
 	result := mergeStruct(base, override)
 	if result.Host != "h2" {

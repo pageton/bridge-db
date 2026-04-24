@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/pageton/bridge-db/internal/logger"
@@ -281,7 +282,7 @@ func (s *mysqlScanner) buildScanQuery(table string) string {
 }
 
 // readRow reads a single row and returns it as a MigrationUnit.
-func (s *mysqlScanner) readRow(ctx context.Context) (*provider.MigrationUnit, error) {
+func (s *mysqlScanner) readRow(_ context.Context) (*provider.MigrationUnit, error) {
 	table := s.tables[s.currentTable]
 
 	// Scan row values
@@ -306,11 +307,8 @@ func (s *mysqlScanner) readRow(ctx context.Context) (*provider.MigrationUnit, er
 		columnTypes[col.Name] = col.Type
 
 		// Check if this column is part of the primary key
-		for _, pkCol := range s.pkColumns {
-			if col.Name == pkCol {
-				pk[col.Name] = val
-				break
-			}
+		if slices.Contains(s.pkColumns, col.Name) {
+			pk[col.Name] = val
 		}
 	}
 

@@ -63,19 +63,6 @@
 
                         mkdir -p "$SEED_DIR"
 
-                        kill_port() {
-                          local port="$1"
-                          if fuser -s -n tcp "$port" 2>/dev/null; then
-                            fuser -k -n tcp "$port" > /dev/null 2>&1 || true
-                            sleep 1
-                          fi
-                        }
-
-                        kill_process() {
-                          local pattern="$1"
-                          pkill -f "$pattern" > /dev/null 2>&1 || true
-                        }
-
                         echo ""
                         echo "=== Bridge-DB Test Environment ==="
                         echo ""
@@ -109,20 +96,7 @@
 
                         # ── Auto-start servers ──────────────────────────────────────
 
-                        # Stop any previously running test database processes first.
-                        kill_process redis-server
-                        kill_process mongod
-                        kill_process postgres
-                        kill_process mysqld
-                        kill_process mariadbd
-                        kill_process mariadbd-safe
-                        kill_process cockroach
                         rm -f /tmp/bridge-test-*.sock
-
-                        # Free any stale listeners bound to the dev-shell ports.
-                        for port in 6379 6380 27017 27018 5432 5433 3306 3307 3308 3309 26257 26258 8079 8081; do
-                          kill_port "$port"
-                        done
 
                         # Redis (primary)
                         mkdir -p "$REDIS_DIR"
@@ -345,6 +319,7 @@
 
                         # === Redis ===
                         if redis-cli ping > /dev/null 2>&1; then
+                          redis-cli DEL orders:user:1 orders:user:2 orders:user:3 orders:user:4 orders:user:5 orders:user:6 orders:user:7 orders:user:8 orders:user:9 orders:user:10 orders:user:11 orders:user:12 orders:user:13 orders:user:14 orders:user:15 orders:user:16 orders:user:17 orders:user:18 orders:user:19 orders:user:20 orders:user:21 orders:user:22 orders:user:23 orders:user:24 orders:user:25 > /dev/null
                           redis-cli HSET user:1 name "Alice Johnson" email "alice@example.com" age 30
                           redis-cli HSET user:2 name "Bob Smith" email "bob@example.com" age 25
                           redis-cli HSET user:3 name "Charlie Brown" email "charlie@example.com" age 35

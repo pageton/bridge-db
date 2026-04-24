@@ -4,6 +4,8 @@ package mssql
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/bytedance/sonic"
 )
@@ -28,15 +30,38 @@ func decodeMSSQLRow(data []byte) (*mssqlRow, error) {
 }
 
 func formatPrimaryKey(pk map[string]any) string {
+	if pk == nil {
+		return "null"
+	}
 	if len(pk) == 1 {
-		for _, v := range pk {
-			return fmt.Sprintf("%v", v)
+		for _, k := range sortedPKKeys(pk) {
+			return fmt.Sprintf("%v", pk[k])
 		}
 	}
-	b, _ := sonic.Marshal(pk)
-	return string(b)
+	parts := make([]string, 0, len(pk))
+	for _, k := range sortedPKKeys(pk) {
+		parts = append(parts, fmt.Sprintf("%q:%s", k, formatPKValue(pk[k])))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 func buildRowKey(table string, pk map[string]any) string {
 	return table + ":" + formatPrimaryKey(pk)
+}
+
+func sortedPKKeys(pk map[string]any) []string {
+	keys := make([]string, 0, len(pk))
+	for k := range pk {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func formatPKValue(v any) string {
+	b, err := sonic.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%q", fmt.Sprintf("%v", v))
+	}
+	return string(b)
 }

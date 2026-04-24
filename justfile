@@ -66,10 +66,10 @@ lint:
 # Testing
 # -------------------------------------------------------
 
-test:
+test: fmt-check
     go test {{ build_tags }} ./...
 
-test-ci:
+test-ci: fmt-check
     go test -v -count=1 -race {{ build_tags }} {{ race_pkgs }}
     go test -v -count=1 {{ build_tags }} {{ no_race_pkgs }}
 
@@ -112,3 +112,22 @@ check: build fmt-check vet lint test
 ci: fmt-check lint test-ci
 
 all: clean build check
+
+# -------------------------------------------------------
+# Benchmarking
+# -------------------------------------------------------
+
+benchmark:
+    just benchmark-small
+
+benchmark-small:
+    go run -tags sqlite ./cmd/bench -sizes small -output docs/benchmark-results.md
+
+benchmark-all:
+    go run -tags sqlite ./cmd/bench -sizes small,medium -batch-sizes 500,1000,5000 -workers 1,2,4 -verify -runs 1 -output docs/benchmark-results.md
+
+benchmark-large:
+    go run -tags sqlite ./cmd/bench -sizes large -batch-sizes 500,1000,5000 -workers 1,2,4,8 -verify -runs 1 -output docs/benchmark-results.md -json docs/benchmark-results.json
+
+benchmark-resume:
+    go run -tags sqlite ./cmd/bench -sizes small,medium -resume -output docs/benchmark-results.md

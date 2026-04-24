@@ -12,8 +12,8 @@ func TestParseMongoDBURL_Full(t *testing.T) {
 	if cfg.Host != "mongohost" {
 		t.Errorf("host = %q", cfg.Host)
 	}
-	if cfg.Port != 27018 {
-		t.Errorf("port = %d", cfg.Port)
+	if *cfg.Port != 27018 {
+		t.Errorf("port = %d", *cfg.Port)
 	}
 	if cfg.Username != "admin" {
 		t.Errorf("username = %q", cfg.Username)
@@ -52,10 +52,10 @@ func TestMongoDBConfig_Validate(t *testing.T) {
 		cfg     MongoDBConfig
 		wantErr bool
 	}{
-		{name: "valid", cfg: MongoDBConfig{Host: "localhost", Port: 27017, Database: "db"}},
-		{name: "empty host", cfg: MongoDBConfig{Host: "", Port: 27017, Database: "db"}, wantErr: true},
-		{name: "bad port", cfg: MongoDBConfig{Host: "localhost", Port: 0, Database: "db"}, wantErr: true},
-		{name: "empty database", cfg: MongoDBConfig{Host: "localhost", Port: 27017, Database: ""}, wantErr: true},
+		{name: "valid", cfg: MongoDBConfig{Host: "localhost", Port: IntPtr(27017), Database: "db"}},
+		{name: "empty host", cfg: MongoDBConfig{Host: "", Port: IntPtr(27017), Database: "db"}, wantErr: true},
+		{name: "bad port", cfg: MongoDBConfig{Host: "localhost", Port: IntPtr(0), Database: "db"}, wantErr: true},
+		{name: "empty database", cfg: MongoDBConfig{Host: "localhost", Port: IntPtr(27017), Database: ""}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,7 +68,7 @@ func TestMongoDBConfig_Validate(t *testing.T) {
 }
 
 func TestMongoDBConfig_Address(t *testing.T) {
-	cfg := MongoDBConfig{Host: "mongo.example.com", Port: 27018}
+	cfg := MongoDBConfig{Host: "mongo.example.com", Port: IntPtr(27018)}
 	if got := cfg.Address(); got != "mongo.example.com:27018" {
 		t.Errorf("Address() = %q", got)
 	}
@@ -76,8 +76,8 @@ func TestMongoDBConfig_Address(t *testing.T) {
 
 func TestDefaultMongoDBConfig(t *testing.T) {
 	cfg := DefaultMongoDBConfig()
-	if cfg.Port != 27017 {
-		t.Errorf("default port = %d", cfg.Port)
+	if *cfg.Port != 27017 {
+		t.Errorf("default port = %d", *cfg.Port)
 	}
 	if cfg.AuthSource != "admin" {
 		t.Errorf("default auth_source = %q", cfg.AuthSource)
@@ -85,7 +85,7 @@ func TestDefaultMongoDBConfig(t *testing.T) {
 }
 
 func TestMergeMongoDB(t *testing.T) {
-	base := MongoDBConfig{Host: "h1", Port: 27017, AuthSource: "admin"}
+	base := MongoDBConfig{Host: "h1", Port: IntPtr(27017), AuthSource: "admin"}
 	override := MongoDBConfig{Host: "h2", Database: "d2", AuthSource: "custom"}
 	result := mergeStruct(base, override)
 	if result.Host != "h2" {

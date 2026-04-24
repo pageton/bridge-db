@@ -88,7 +88,7 @@ func (p *MongoDBProvider) Connect(_ context.Context, srcConfig, dstConfig any) e
 	p.database = client.Database(cfg.Database)
 
 	log := logger.L().With("provider", "mongodb", "role", p.role)
-	log.Debug("configured mongodb client", "host", cfg.Host, "port", cfg.Port, "database", cfg.Database)
+	log.Debug("configured mongodb client", "host", cfg.Host, "port", cfg.GetPort(), "database", cfg.Database)
 
 	return nil
 }
@@ -351,7 +351,7 @@ func mongoDBConfigFromMap(m map[string]string) (*config.MongoDBConfig, error) {
 
 	cfg := config.DefaultMongoDBConfig()
 	cfg.Host = host
-	cfg.Port = port
+	cfg.Port = config.IntPtr(port)
 
 	// Copy database name if provided
 	if db := m["database"]; db != "" {
@@ -371,7 +371,11 @@ func buildMongoDBURI(cfg *config.MongoDBConfig) string {
 		uri += "@"
 	}
 
-	uri += fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	port := 27017
+	if cfg.Port != nil {
+		port = cfg.GetPort()
+	}
+	uri += fmt.Sprintf("%s:%d", cfg.Host, port)
 
 	if cfg.Database != "" {
 		uri += "/" + cfg.Database
@@ -381,7 +385,7 @@ func buildMongoDBURI(cfg *config.MongoDBConfig) string {
 		uri += "?authSource=" + cfg.AuthSource
 	}
 
-	if cfg.TLS {
+	if cfg.GetTLS() {
 		if strings.Contains(uri, "?") {
 			uri += "&tls=true"
 		} else {

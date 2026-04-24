@@ -303,8 +303,8 @@ Run `bridge migrate --help` for the full list.
 
 ```
 ┌──────────┐    ┌───────────┐    ┌──────────────────┐    ┌──────────┐
-│ Scanner  │───>│ Transform │───>│  buffered channel │───>│  Writer  │
-│ (1 proc) │    │ (inline)  │    │   (backpressure)  │    │ (N proc) │
+│ Scanner  │───>│ Transform │───>│ buffered channel │───>│  Writer  │
+│ (1 proc) │    │ (inline)  │    │  (backpressure)  │    │ (N proc) │
 └──────────┘    └───────────┘    └──────────────────┘    └──────────┘
 ```
 
@@ -448,6 +448,27 @@ bridge migrate \
 2. Add a transformer pair in `internal/transform/`
 3. Register in `cmd/bridge/` with a build tag
 4. Add tests
+
+## About
+
+bridge is a database migration tool that supports moving data between 8 different database systems: Redis, MongoDB, PostgreSQL, MySQL, MariaDB, CockroachDB, MSSQL, and SQLite.
+
+### Key Features
+
+- **Cross-database migration**: Migrate data between any pair of supported databases with automatic type mapping
+- **Same-database migration**: Copy data between instances of the same database type
+- **Schema migration**: Automatically migrate table schemas for SQL databases
+- **SSH tunneling**: Connect to databases behind firewalls via SSH bastion hosts
+- **Checkpoint & resume**: Pause and resume migrations with checkpoint support
+- **Verification**: Verify data integrity after migration
+- **Dry-run mode**: Test migrations without writing to destination
+
+### Why bridge?
+
+- Single unified tool for all database migration needs
+- No intermediate export/import steps required
+- Handles type conversion for cross-database migrations automatically
+- Written in Go for fast performance and zero runtime dependencies
 
 ## License
 

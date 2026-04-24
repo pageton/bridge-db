@@ -38,6 +38,14 @@ type mariadbPassthroughTransformer struct {
 }
 
 func (t *mariadbPassthroughTransformer) Transform(ctx context.Context, units []provider.MigrationUnit) ([]provider.MigrationUnit, error) {
+	// NoSQL→SQL: convert Redis/MongoDB envelopes to SQL row envelopes first.
+	if t.src == "redis" && IsSQLProvider(t.dst) {
+		return RedisToSQL(units, sqlEnvelopeConfigForProvider(t.dst), &t.cfg)
+	}
+	if t.src == "mongodb" && IsSQLProvider(t.dst) {
+		return MongoDBToSQL(units, sqlEnvelopeConfigForProvider(t.dst), &t.cfg)
+	}
+
 	// Apply null handling and field mappings for all paths.
 	pipe := NewStagePipeline(
 		NullHandlingStage(&t.cfg),
@@ -72,7 +80,9 @@ func (t *mariadbPassthroughTransformer) Transform(ctx context.Context, units []p
 	}
 }
 
-func (t *mariadbPassthroughTransformer) NeedsSchema() bool            { return true }
+func (t *mariadbPassthroughTransformer) NeedsSchema() bool {
+	return IsSQLProvider(t.src) && IsSQLProvider(t.dst)
+}
 func (t *mariadbPassthroughTransformer) SetSchema(s *provider.Schema) { t.schema = s }
 func (t *mariadbPassthroughTransformer) TypeMapper() provider.TypeMapper {
 	return mariadbTypeMapper{src: t.src, dst: t.dst}
@@ -91,17 +101,21 @@ func (m mariadbTypeMapper) MapType(colType string) (string, bool) {
 		return mariadbToPostgresType(upper)
 	case "sqlite":
 		return mariadbToSQLiteType(upper)
-	case "mariadb":
-		// Map incoming types to MariaDB-compatible types.
+	case "mariadb", "mysql":
+		// MariaDB and MySQL share the same type system.
+		// Map incoming types to MySQL/MariaDB-compatible types.
 		switch m.src {
 		case "postgres", "cockroachdb":
 			return postgresToMariaDBType(upper)
+		case "sqlite":
+			return SQLiteToMySQLTypeMapper{}.MapType(colType)
 		default:
-			// MySQL types are already MariaDB-compatible.
-			return "", false
+			// Same-family types (e.g. mariadb→mysql) are directly compatible.
+			return colType, true
 		}
 	case "redis", "mongodb":
-		return "", false
+		// NoSQL destinations are schema-free; source types are preserved as-is.
+		return colType, true
 	default:
 		return "", false
 	}

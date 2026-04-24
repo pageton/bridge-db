@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/pageton/bridge-db/internal/logger"
@@ -173,10 +174,15 @@ func (m *sqliteSchemaMigrator) getTableIndexes(ctx context.Context, table string
 		}{
 			name:    name,
 			unique:  unique == 1,
-			primary: origin == "c",
+			primary: origin == "pk",
 		})
 	}
 	_ = rows.Close()
+
+	pkColumns, err := m.getPrimaryKeyColumns(ctx, table)
+	if err != nil {
+		return nil, err
+	}
 
 	var result []provider.IndexSchema
 	for _, idx := range indexes {
@@ -211,7 +217,64 @@ func (m *sqliteSchemaMigrator) getTableIndexes(ctx context.Context, table string
 		}
 	}
 
+	if len(pkColumns) > 0 {
+		hasPrimary := false
+		for _, idx := range result {
+			if idx.Primary {
+				hasPrimary = true
+				break
+			}
+		}
+		if !hasPrimary {
+			result = append(result, provider.IndexSchema{
+				Name:    table + "_pk",
+				Columns: pkColumns,
+				Unique:  true,
+				Primary: true,
+			})
+		}
+	}
+
 	return result, nil
+}
+
+func (m *sqliteSchemaMigrator) getPrimaryKeyColumns(ctx context.Context, table string) ([]string, error) {
+	query := fmt.Sprintf("PRAGMA table_info(%s)", quoteIdentifier(table))
+	rows, err := m.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	type pkCol struct {
+		order int
+		name  string
+	}
+	var cols []pkCol
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull int
+		var defaultVal sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultVal, &pk); err != nil {
+			continue
+		}
+		if pk > 0 {
+			cols = append(cols, pkCol{order: pk, name: name})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(cols, func(a, b pkCol) int {
+		return a.order - b.order
+	})
+	out := make([]string, 0, len(cols))
+	for _, col := range cols {
+		out = append(out, col.name)
+	}
+	return out, nil
 }
 
 func (m *sqliteSchemaMigrator) createTable(ctx context.Context, table provider.TableSchema, mapper provider.TypeMapper) error {

@@ -307,7 +307,7 @@ func TestParseRowKey_InvalidJSON(t *testing.T) {
 func TestBuildMariaDBDSN_Format(t *testing.T) {
 	cfg := &config.MariaDBConfig{
 		Host:     "localhost",
-		Port:     3306,
+		Port:     config.IntPtr(3306),
 		Username: "root",
 		Password: "secret",
 		Database: "mydb",

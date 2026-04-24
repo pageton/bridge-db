@@ -12,6 +12,33 @@ import (
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
+func mssqlSafeDefault(defaultVal string) (string, bool) {
+	if defaultVal == "" {
+		return "", false
+	}
+
+	upper := strings.ToUpper(strings.TrimSpace(defaultVal))
+
+	switch upper {
+	case "NOW()", "CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP":
+		return "CURRENT_TIMESTAMP", true
+	}
+
+	if strings.Contains(upper, "NEXTVAL(") ||
+		strings.Contains(upper, "UUID_GENERATE_V4()") ||
+		strings.Contains(upper, "GEN_RANDOM_UUID()") ||
+		strings.Contains(upper, "AUTOINCREMENT") ||
+		strings.Contains(upper, "IDENTITY") {
+		return "", false
+	}
+
+	if strings.Contains(upper, "()") && !strings.HasPrefix(upper, "'") {
+		return "", false
+	}
+
+	return defaultVal, true
+}
+
 type mssqlSchemaMigrator struct {
 	db  *sql.DB
 	log interface {
@@ -204,9 +231,8 @@ func (m *mssqlSchemaMigrator) createTable(ctx context.Context, table provider.Ta
 		}
 
 		if col.Default != "" && !col.AutoInc {
-			upper := strings.ToUpper(col.Default)
-			if !strings.Contains(upper, "IDENTITY") && !strings.Contains(upper, "AUTOINCREMENT") {
-				def += " DEFAULT " + col.Default
+			if safeDefault, ok := mssqlSafeDefault(col.Default); ok {
+				def += " DEFAULT " + safeDefault
 			}
 		}
 

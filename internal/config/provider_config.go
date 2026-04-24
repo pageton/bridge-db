@@ -52,8 +52,12 @@ func ProviderConfigWithTunnel(cfg *ConnectionConfig, tunnelAddr string) (any, er
 	if h := clone.FieldByName("Host"); h.IsValid() && h.Kind() == reflect.String {
 		h.SetString(host)
 	}
-	if p := clone.FieldByName("Port"); p.IsValid() && p.Kind() == reflect.Int {
-		p.SetInt(int64(port))
+	if p := clone.FieldByName("Port"); p.IsValid() {
+		if p.Kind() == reflect.Ptr && p.Type().Elem().Kind() == reflect.Int {
+			p.Set(reflect.ValueOf(IntPtr(port)))
+		} else if p.Kind() == reflect.Int {
+			p.SetInt(int64(port))
+		}
 	}
 
 	return clone.Addr().Interface(), nil

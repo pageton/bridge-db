@@ -168,7 +168,7 @@ func TestCountComparison_Matching(t *testing.T) {
 		tables: map[string]int64{"users": 100, "orders": 500},
 	}
 
-	cv := NewCrossVerifier(src, dst, CountsOnly())
+	cv, _ := NewCrossVerifier(src, dst, CountsOnly())
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -188,7 +188,7 @@ func TestCountComparison_CountMismatch(t *testing.T) {
 		tables: map[string]int64{"users": 99},
 	}
 
-	cv := NewCrossVerifier(src, dst, CountsOnly())
+	cv, _ := NewCrossVerifier(src, dst, CountsOnly())
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -211,7 +211,7 @@ func TestCountComparison_MissingTable(t *testing.T) {
 		tables: map[string]int64{"users": 100},
 	}
 
-	cv := NewCrossVerifier(src, dst, CountsOnly())
+	cv, _ := NewCrossVerifier(src, dst, CountsOnly())
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -240,7 +240,7 @@ func TestCountComparison_ExtraTableInDest(t *testing.T) {
 		tables: map[string]int64{"users": 100, "orphan": 10},
 	}
 
-	cv := NewCrossVerifier(src, dst, CountsOnly())
+	cv, _ := NewCrossVerifier(src, dst, CountsOnly())
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -277,7 +277,7 @@ func TestChecksumComparison_Matching(t *testing.T) {
 		ChecksumComparison: true,
 		MaxSampleKeys:      10000,
 	}
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -309,7 +309,7 @@ func TestChecksumComparison_Mismatch(t *testing.T) {
 		ChecksumComparison: true,
 		MaxSampleKeys:      10000,
 	}
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -350,7 +350,7 @@ func TestChecksumComparison_MissingInDest(t *testing.T) {
 		ChecksumComparison: true,
 		MaxSampleKeys:      10000,
 	}
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -396,7 +396,7 @@ func TestRecordComparison_FieldDiff(t *testing.T) {
 		ChecksumComparison: false, // use record comparison
 		MaxSampleKeys:      10000,
 	}
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -440,7 +440,7 @@ func TestCrossProviderSampling_FallsBackToRecordComparison(t *testing.T) {
 		ChecksumComparison: true,
 		MaxSampleKeys:      10000,
 	}
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -478,7 +478,7 @@ func TestCrossProviderSampling_NormalizesMongoObjectIDToString(t *testing.T) {
 		MaxSampleKeys:      10000,
 	}
 
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -527,7 +527,7 @@ func TestCrossProviderSampling_RedisToMongoSkipsSyntheticTables(t *testing.T) {
 	}
 
 	opts := Options{CountComparison: true, SampleMode: "count", SampleN: 1, MaxSampleKeys: 10000}
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -620,7 +620,7 @@ func TestTableSummary(t *testing.T) {
 		tables: map[string]int64{"a": 10, "b": 21}, // b mismatches
 	}
 
-	cv := NewCrossVerifier(src, dst, CountsOnly())
+	cv, _ := NewCrossVerifier(src, dst, CountsOnly())
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -759,7 +759,7 @@ func TestPerTableResults_Pass(t *testing.T) {
 		tables: map[string]int64{"users": 100, "orders": 200},
 	}
 
-	cv := NewCrossVerifier(src, dst, CountsOnly())
+	cv, _ := NewCrossVerifier(src, dst, CountsOnly())
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -792,7 +792,7 @@ func TestPerTableResults_Fail(t *testing.T) {
 		tables: map[string]int64{"users": 100, "orders": 199},
 	}
 
-	cv := NewCrossVerifier(src, dst, CountsOnly())
+	cv, _ := NewCrossVerifier(src, dst, CountsOnly())
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -834,7 +834,7 @@ func TestPerTableResults_SamplingAddsInfo(t *testing.T) {
 		ChecksumComparison: true,
 		MaxSampleKeys:      10000,
 	}
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -884,7 +884,7 @@ func TestSampling_NonPublicSchemaUsesRawSourceTableName(t *testing.T) {
 		MaxSampleKeys:      10000,
 	}
 
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1025,7 +1025,7 @@ func TestCoverageMetrics(t *testing.T) {
 		ChecksumComparison: true,
 		MaxSampleKeys:      10000,
 	}
-	cv := NewCrossVerifier(src, dst, opts)
+	cv, _ := NewCrossVerifier(src, dst, opts)
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1223,7 +1223,7 @@ func TestVerify_NoTableEnumerator(t *testing.T) {
 	src := &mockProvider{name: "src", tables: map[string]int64{}}
 	dst := &mockProvider{name: "dst", tables: map[string]int64{}}
 
-	cv := NewCrossVerifier(src, dst, CountsOnly())
+	cv, _ := NewCrossVerifier(src, dst, CountsOnly())
 	report, err := cv.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1251,6 +1251,96 @@ func TestPassed_BackwardCompat(t *testing.T) {
 	r3 := &VerificationReport{VerifiedAny: false}
 	if r3.Passed() {
 		t.Error("expected Passed=false when not verified")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NewCrossVerifier constructor tests
+// ---------------------------------------------------------------------------
+
+func TestNewCrossVerifier_ValidOptions(t *testing.T) {
+	src := &mockProvider{name: "src"}
+	dst := &mockProvider{name: "dst"}
+
+	cv, err := NewCrossVerifier(src, dst, DefaultOptions())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cv == nil {
+		t.Fatal("expected non-nil CrossVerifier")
+	}
+	if cv.srcName != "src" {
+		t.Errorf("srcName = %q, want %q", cv.srcName, "src")
+	}
+	if cv.dstName != "dst" {
+		t.Errorf("dstName = %q, want %q", cv.dstName, "dst")
+	}
+}
+
+func TestNewCrossVerifier_CountsOnlyValid(t *testing.T) {
+	src := &mockProvider{name: "src"}
+	dst := &mockProvider{name: "dst"}
+
+	cv, err := NewCrossVerifier(src, dst, CountsOnly())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cv == nil {
+		t.Fatal("expected non-nil CrossVerifier")
+	}
+}
+
+func TestNewCrossVerifier_InvalidSampleMode(t *testing.T) {
+	src := &mockProvider{name: "src"}
+	dst := &mockProvider{name: "dst"}
+
+	_, err := NewCrossVerifier(src, dst, Options{SampleMode: "bogus"})
+	if err == nil {
+		t.Fatal("expected error for invalid sample_mode, got nil")
+	}
+	if !containsStr(err.Error(), "invalid sample_mode") {
+		t.Errorf("error should mention invalid sample_mode, got: %v", err)
+	}
+}
+
+func TestNewCrossVerifier_InvalidCountModeZeroN(t *testing.T) {
+	src := &mockProvider{name: "src"}
+	dst := &mockProvider{name: "dst"}
+
+	_, err := NewCrossVerifier(src, dst, Options{SampleMode: "count", SampleN: 0})
+	if err == nil {
+		t.Fatal("expected error for count mode with zero SampleN, got nil")
+	}
+	if !containsStr(err.Error(), "sample_n must be positive") {
+		t.Errorf("error should mention sample_n, got: %v", err)
+	}
+}
+
+func TestNewCrossVerifier_InvalidPctModeOutOfRange(t *testing.T) {
+	src := &mockProvider{name: "src"}
+	dst := &mockProvider{name: "dst"}
+
+	_, err := NewCrossVerifier(src, dst, Options{SampleMode: "pct", SamplePct: 0})
+	if err == nil {
+		t.Fatal("expected error for pct mode with 0%, got nil")
+	}
+
+	_, err = NewCrossVerifier(src, dst, Options{SampleMode: "pct", SamplePct: 200})
+	if err == nil {
+		t.Fatal("expected error for pct mode with 200%, got nil")
+	}
+}
+
+func TestNewCrossVerifier_DoesNotFallbackToDefaults(t *testing.T) {
+	src := &mockProvider{name: "src"}
+	dst := &mockProvider{name: "dst"}
+
+	// Before the fix, this silently fell back to DefaultOptions.
+	// After the fix, it must return an error.
+	invalidOpts := Options{SampleMode: "count", SampleN: -1}
+	_, err := NewCrossVerifier(src, dst, invalidOpts)
+	if err == nil {
+		t.Fatal("expected error for invalid opts — no silent fallback allowed")
 	}
 }
 

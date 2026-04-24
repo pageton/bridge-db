@@ -225,6 +225,72 @@ func TestBatchWriter_PartialFailure_IndividualRetryFails(t *testing.T) {
 	}
 }
 
+func TestBatchWriter_PartialFailure_IndividualRetryNoOpDoesNotRetry(t *testing.T) {
+	failKey := "users:10"
+	w := &partialFailWriter{
+		failKeys:   map[string]bool{failKey: true},
+		noOpKey:    map[string]bool{failKey: true},
+		singleCall: make(map[string]int),
+	}
+
+	bw := &batchWriter{
+		w: w,
+		cfg: writeConfig{
+			MaxRetries:       3,
+			RetryBackoff:     0,
+			ConflictStrategy: provider.ConflictOverwrite,
+			MaxPerUnitRetry:  10,
+		},
+	}
+	p := &Pipeline{
+		keyRing:  make([]string, 1024),
+		tableSet: make(map[string]bool),
+	}
+
+	units := makeTestUnits(3, "users")
+	out := bw.writeBatch(context.Background(), p, units)
+
+	if out.writeErr != nil {
+		t.Fatalf("unexpected write error: %v", out.writeErr)
+	}
+	if len(out.unitErrors) != 0 {
+		t.Fatalf("expected no unit errors, got %d", len(out.unitErrors))
+	}
+	if out.result.WrittenUnits != 2 {
+		t.Fatalf("expected 2 written units, got %d", out.result.WrittenUnits)
+	}
+	if out.result.SkippedUnits != 1 {
+		t.Fatalf("expected 1 skipped unit, got %d", out.result.SkippedUnits)
+	}
+	if out.result.FailedUnits != 0 {
+		t.Fatalf("expected 0 failed units, got %d", out.result.FailedUnits)
+	}
+	if got := w.singleAttemptsFor(failKey); got != 1 {
+		t.Fatalf("expected 1 single-unit attempt for %q, got %d", failKey, got)
+	}
+	if len(out.result.FailedKeys) != 0 {
+		t.Fatalf("expected failed keys to be cleared, got %v", out.result.FailedKeys)
+	}
+}
+
+func TestWriteSingleWithRetry_NoOpSuccessDoesNotRetry(t *testing.T) {
+	w := &noOpWriter{}
+	bw := &batchWriter{
+		w:   w,
+		cfg: writeConfig{MaxRetries: 3, RetryBackoff: 0},
+	}
+	res, err := bw.writeSingleWithRetry(context.Background(), provider.MigrationUnit{Key: "users:1"}, &noopWriterLogger{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || res.SkippedUnits != 1 {
+		t.Fatalf("expected skipped result, got %+v", res)
+	}
+	if w.attempts() != 1 {
+		t.Fatalf("expected 1 write attempt, got %d", w.attempts())
+	}
+}
+
 func TestBatchWriter_EmptyBatch(t *testing.T) {
 	w := &trackingWriter{}
 	bw := &batchWriter{
@@ -381,6 +447,8 @@ func (w *failWriter) attempts() int64               { return w.attemptCount.Load
 type partialFailWriter struct {
 	failKeys   map[string]bool
 	succeedKey map[string]bool // nil = never succeed on retry
+	noOpKey    map[string]bool
+	singleCall map[string]int
 }
 
 func (w *partialFailWriter) Write(_ context.Context, units []provider.MigrationUnit) (*provider.BatchResult, error) {
@@ -389,12 +457,23 @@ func (w *partialFailWriter) Write(_ context.Context, units []provider.MigrationU
 	var failed int
 
 	// On individual retry (single unit), check succeedKey.
-	if len(units) == 1 && w.succeedKey != nil && w.succeedKey[units[0].Key] {
-		return &provider.BatchResult{
-			TotalUnits:   1,
-			WrittenUnits: 1,
-			BytesWritten: 50,
-		}, nil
+	if len(units) == 1 {
+		if w.singleCall != nil {
+			w.singleCall[units[0].Key]++
+		}
+		if w.succeedKey != nil && w.succeedKey[units[0].Key] {
+			return &provider.BatchResult{
+				TotalUnits:   1,
+				WrittenUnits: 1,
+				BytesWritten: 50,
+			}, nil
+		}
+		if w.noOpKey != nil && w.noOpKey[units[0].Key] {
+			return &provider.BatchResult{
+				TotalUnits:   1,
+				SkippedUnits: 1,
+			}, nil
+		}
 	}
 
 	for _, u := range units {
@@ -415,6 +494,28 @@ func (w *partialFailWriter) Write(_ context.Context, units []provider.MigrationU
 }
 
 func (w *partialFailWriter) Flush(_ context.Context) error { return nil }
+
+func (w *partialFailWriter) singleAttemptsFor(key string) int {
+	if w.singleCall == nil {
+		return 0
+	}
+	return w.singleCall[key]
+}
+
+type noOpWriter struct{ called atomic.Int64 }
+
+func (w *noOpWriter) Write(_ context.Context, units []provider.MigrationUnit) (*provider.BatchResult, error) {
+	w.called.Add(1)
+	return &provider.BatchResult{TotalUnits: len(units), SkippedUnits: len(units)}, nil
+}
+
+func (w *noOpWriter) Flush(_ context.Context) error { return nil }
+func (w *noOpWriter) attempts() int64               { return w.called.Load() }
+
+type noopWriterLogger struct{}
+
+func (*noopWriterLogger) Debug(string, ...any) {}
+func (*noopWriterLogger) Warn(string, ...any)  {}
 
 // testMetricsRecorder is a minimal metrics recorder for tests.
 type testMetricsRecorder struct {

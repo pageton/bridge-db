@@ -157,20 +157,21 @@ type MigrateInput struct {
 	ConfigPath string `json:"config_path,omitempty" jsonschema:"Path to a YAML config file (e.g. configs/example.yaml). When set, source/destination/pipeline fields are used as overrides."`
 	ConfigYAML string `json:"config_yaml,omitempty" jsonschema:"Inline YAML config string. When set, source/destination/pipeline fields are used as overrides."`
 
-	Source         ConnectionInput `json:"source"`
-	Destination    ConnectionInput `json:"destination"`
-	CheckpointPath string          `json:"checkpoint_path,omitempty" jsonschema:"Checkpoint file path (default .bridge-db/checkpoint.json)"`
-	BatchSize      int             `json:"batch_size,omitempty" jsonschema:"Number of records per batch (default 1000)"`
-	Verify         *bool           `json:"verify,omitempty" jsonschema:"Verify data after migration (default true)"`
-	MigrateSchema  *bool           `json:"migrate_schema,omitempty" jsonschema:"Migrate DDL schema (default true)"`
-	OnConflict     string          `json:"on_conflict,omitempty" jsonschema:"Conflict strategy: overwrite, skip, error (default overwrite)"`
-	FKHandling     string          `json:"fk_handling,omitempty" jsonschema:"Foreign key handling: defer_constraints, ordered, skip (default defer_constraints)"`
-	MaxRetries     int             `json:"max_retries,omitempty" jsonschema:"Max retry attempts per batch (default 3)"`
-	Parallel       int             `json:"parallel,omitempty" jsonschema:"Scan/write buffer depth (default 4)"`
-	WriteWorkers   int             `json:"write_workers,omitempty" jsonschema:"Concurrent writer goroutines (default 1)"`
-	Checkpoint     *bool           `json:"checkpoint,omitempty" jsonschema:"Enable checkpointing for resumability (default true)"`
-	Resume         *bool           `json:"resume,omitempty" jsonschema:"Resume from last checkpoint (default false)"`
-	FailFast       *bool           `json:"fail_fast,omitempty" jsonschema:"Abort on first transform error (default false)"`
+	Source          ConnectionInput `json:"source"`
+	Destination     ConnectionInput `json:"destination"`
+	CheckpointPath  string          `json:"checkpoint_path,omitempty" jsonschema:"Checkpoint file path (default .bridge-db/checkpoint.json)"`
+	BatchSize       int             `json:"batch_size,omitempty" jsonschema:"Number of records per batch (default 1000)"`
+	Verify          *bool           `json:"verify,omitempty" jsonschema:"Verify data after migration (default true)"`
+	MigrateSchema   *bool           `json:"migrate_schema,omitempty" jsonschema:"Migrate DDL schema (default true)"`
+	OnConflict      string          `json:"on_conflict,omitempty" jsonschema:"Conflict strategy: overwrite, skip, error (default overwrite)"`
+	FKHandling      string          `json:"fk_handling,omitempty" jsonschema:"Foreign key handling: defer_constraints, ordered, skip (default defer_constraints)"`
+	MaxRetries      int             `json:"max_retries,omitempty" jsonschema:"Max retry attempts per batch (default 3)"`
+	MaxPerUnitRetry int             `json:"max_per_unit_retry,omitempty" jsonschema:"Max failed units to retry individually per batch (0 = auto, default 0)"`
+	Parallel        int             `json:"parallel,omitempty" jsonschema:"Scan/write buffer depth (default 4)"`
+	WriteWorkers    int             `json:"write_workers,omitempty" jsonschema:"Concurrent writer goroutines (default 1)"`
+	Checkpoint      *bool           `json:"checkpoint,omitempty" jsonschema:"Enable checkpointing for resumability (default true)"`
+	Resume          *bool           `json:"resume,omitempty" jsonschema:"Resume from last checkpoint (default false)"`
+	FailFast        *bool           `json:"fail_fast,omitempty" jsonschema:"Abort on first transform error (default false)"`
 }
 
 // PlanMigrationOutput contains the first-class structured migration plan.
@@ -635,6 +636,9 @@ func buildPlanRequest(input MigrateInput) (*config.MigrationConfig, bridge.Pipel
 	}
 	if input.MaxRetries > 0 {
 		opts.MaxRetries = input.MaxRetries
+	}
+	if input.MaxPerUnitRetry > 0 {
+		opts.MaxPerUnitRetry = input.MaxPerUnitRetry
 	}
 	if input.Parallel > 0 {
 		opts.Parallel = input.Parallel

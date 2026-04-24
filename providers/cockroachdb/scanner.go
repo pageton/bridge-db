@@ -13,6 +13,9 @@ import (
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
+// cockroachDBScanner enumerates rows from a CockroachDB database using
+// LIMIT/OFFSET pagination. It lists all tables, then scans each table
+// in batches, yielding batches of MigrationUnits.
 type cockroachDBScanner struct {
 	pool            *pgxpool.Pool
 	opts            provider.ScanOptions
@@ -23,6 +26,7 @@ type cockroachDBScanner struct {
 	columns         []columnInfo
 	pkColumns       []string
 	done            bool
+	offset          int
 	tablesCompleted map[string]bool
 	log             interface {
 		Debug(msg string, args ...any)
@@ -85,9 +89,11 @@ func (s *cockroachDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit
 			return nil, io.EOF
 		}
 	}
-	units := make([]provider.MigrationUnit, 0, batchSize)
-	for len(units) < batchSize && !s.done {
-		if s.rows != nil && s.rows.Next() {
+
+	// Drain leftover rows from a previous fetch.
+	if s.rows != nil {
+		units := make([]provider.MigrationUnit, 0, batchSize)
+		for s.rows.Next() && len(units) < batchSize {
 			unit, err := s.readRow(ctx)
 			if err != nil {
 				s.log.Debug("failed to read row, skipping",
@@ -97,43 +103,81 @@ func (s *cockroachDBScanner) Next(ctx context.Context) ([]provider.MigrationUnit
 			units = append(units, *unit)
 			s.stats.TotalScanned++
 			s.stats.TotalBytes += unit.Size
-			continue
 		}
-		if s.rows != nil {
-			if err := s.rows.Err(); err != nil {
-				s.log.Debug("row error", "table", s.tables[s.currentTable].Name, "error", err)
-			}
-			s.rows.Close()
-			s.rows = nil
-			s.currentTable++
-			s.stats.TablesDone++
+		if err := s.rows.Err(); err != nil {
+			s.log.Debug("row error", "table", s.tables[s.currentTable].Name, "error", err)
 		}
-		if s.currentTable >= len(s.tables) {
-			s.done = true
-			break
+		s.rows.Close()
+		s.rows = nil
+		if len(units) > 0 {
+			s.offset += len(units)
+			return units, nil
 		}
+		s.offset = 0
+		s.currentTable++
+		s.stats.TablesDone++
+	}
+
+	// Advance to the next table that has data.
+	for s.currentTable < len(s.tables) {
 		table := s.tables[s.currentTable]
-		s.log.Debug("scanning table", "schema", table.Schema, "table", table.Name)
+		s.log.Debug("scanning table", "schema", table.Schema, "table", table.Name, "offset", s.offset)
+
 		if err := s.getTableInfo(ctx, table); err != nil {
 			s.log.Debug("failed to get table info", "table", table.Name, "error", err)
 			s.currentTable++
 			s.stats.TablesDone++
+			s.offset = 0
 			continue
 		}
-		query := s.buildScanQuery(table)
+
+		query := s.buildPaginatedQuery(table, batchSize, s.offset)
 		rows, err := s.pool.Query(ctx, query)
 		if err != nil {
-			s.log.Debug("failed to open cursor for table", "table", table.Name, "error", err)
+			s.log.Debug("failed to query table", "table", table.Name, "error", err)
+			s.currentTable++
+			s.stats.TablesDone++
+			s.offset = 0
+			continue
+		}
+
+		units := make([]provider.MigrationUnit, 0, batchSize)
+		for rows.Next() {
+			unit, err := s.readRowDirect(ctx, table, rows)
+			if err != nil {
+				s.log.Debug("failed to read row, skipping",
+					"table", table.Name, "error", err)
+				continue
+			}
+			units = append(units, *unit)
+			s.stats.TotalScanned++
+			s.stats.TotalBytes += unit.Size
+		}
+		if err := rows.Err(); err != nil {
+			s.log.Debug("row error", "table", table.Name, "error", err)
+		}
+		rows.Close()
+
+		if len(units) == 0 {
+			s.offset = 0
 			s.currentTable++
 			s.stats.TablesDone++
 			continue
 		}
-		s.rows = rows
+
+		s.offset += len(units)
+
+		if len(units) < batchSize {
+			s.offset = 0
+			s.currentTable++
+			s.stats.TablesDone++
+		}
+
+		return units, nil
 	}
-	if len(units) == 0 {
-		return nil, io.EOF
-	}
-	return units, nil
+
+	s.done = true
+	return nil, io.EOF
 }
 
 func (s *cockroachDBScanner) Stats() provider.ScanStats { return s.stats }
@@ -142,8 +186,8 @@ func (s *cockroachDBScanner) Close() error {
 	if s.rows != nil {
 		s.rows.Close()
 		s.rows = nil
-		s.done = true
 	}
+	s.done = true
 	return nil
 }
 
@@ -205,6 +249,11 @@ func (s *cockroachDBScanner) getTableInfo(ctx context.Context, table tableInfo) 
 		if err := rows.Scan(&col.Name, &col.Type, &nullable); err != nil {
 			continue
 		}
+		// CockroachDB adds a hidden "rowid" column to tables. It is not a
+		// real user column and should not be migrated.
+		if col.Name == "rowid" {
+			continue
+		}
 		col.Nullable = nullable == "YES"
 		columns = append(columns, col)
 	}
@@ -231,6 +280,9 @@ func (s *cockroachDBScanner) getTableInfo(ctx context.Context, table tableInfo) 
 		if err := pkRows.Scan(&col); err != nil {
 			continue
 		}
+		if col == "rowid" {
+			continue
+		}
 		pkColumns = append(pkColumns, col)
 	}
 	if len(pkColumns) == 0 {
@@ -242,7 +294,7 @@ func (s *cockroachDBScanner) getTableInfo(ctx context.Context, table tableInfo) 
 	return nil
 }
 
-func (s *cockroachDBScanner) buildScanQuery(table tableInfo) string {
+func (s *cockroachDBScanner) buildPaginatedQuery(table tableInfo, limit, offset int) string {
 	colNames := make([]string, len(s.columns))
 	for i, col := range s.columns {
 		colNames[i] = quoteIdentifier(col.Name)
@@ -251,20 +303,18 @@ func (s *cockroachDBScanner) buildScanQuery(table tableInfo) string {
 	for i, col := range s.pkColumns {
 		orderBy[i] = quoteIdentifier(col)
 	}
-	return fmt.Sprintf("SELECT %s FROM %s.%s ORDER BY %s",
+	return fmt.Sprintf(
+		"SELECT %s FROM %s.%s ORDER BY %s LIMIT %d OFFSET %d",
 		strings.Join(colNames, ", "),
 		quoteIdentifier(table.Schema), quoteIdentifier(table.Name),
-		strings.Join(orderBy, ", "))
+		strings.Join(orderBy, ", "),
+		limit, offset,
+	)
 }
 
-func (s *cockroachDBScanner) readRow(_ context.Context) (*provider.MigrationUnit, error) {
-	table := s.tables[s.currentTable]
-	values := make([]any, len(s.columns))
-	valuePtrs := make([]any, len(s.columns))
-	for i := range values {
-		valuePtrs[i] = &values[i]
-	}
-	if err := s.rows.Scan(valuePtrs...); err != nil {
+func (s *cockroachDBScanner) readRowDirect(_ context.Context, table tableInfo, rows pgx.Rows) (*provider.MigrationUnit, error) {
+	values, err := rows.Values()
+	if err != nil {
 		return nil, err
 	}
 	data := make(map[string]any)
@@ -295,6 +345,11 @@ func (s *cockroachDBScanner) readRow(_ context.Context) (*provider.MigrationUnit
 		Data: rowData, Meta: provider.UnitMeta{Schema: table.Schema, PrimaryKey: pk, ColumnTypes: columnTypes},
 		Size: int64(len(rowData)),
 	}, nil
+}
+
+func (s *cockroachDBScanner) readRow(ctx context.Context) (*provider.MigrationUnit, error) {
+	table := s.tables[s.currentTable]
+	return s.readRowDirect(ctx, table, s.rows)
 }
 
 func quoteIdentifier(s string) string {

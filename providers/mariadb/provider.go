@@ -300,7 +300,7 @@ func mariaDBConfigFromMap(m map[string]string) (*config.MariaDBConfig, error) {
 	}
 	cfg := config.DefaultMariaDBConfig()
 	cfg.Host = host
-	cfg.Port = port
+	cfg.Port = config.IntPtr(port)
 	if db := m["database"]; db != "" {
 		cfg.Database = db
 	}

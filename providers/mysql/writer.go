@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -80,7 +81,11 @@ func (w *mysqlWriter) Write(ctx context.Context, units []provider.MigrationUnit)
 	// Write each table's rows
 	for table, rows := range tableRows {
 		if err := w.writeTable(ctx, table, rows, &failedKeys, &errors); err != nil {
-			w.log.Debug("failed to write table", "table", table, "error", err)
+			w.failed += int64(len(rows))
+			for _, row := range rows {
+				failedKeys = append(failedKeys, buildRowKey(table, row.PrimaryKey))
+			}
+			errors = append(errors, fmt.Errorf("write table %s: %w", table, err))
 		}
 	}
 
@@ -107,11 +112,42 @@ func (w *mysqlWriter) writeTable(ctx context.Context, table string, rows []mysql
 		return nil
 	}
 
-	// Get column names from first row
-	firstRow := rows[0]
-	columns := make([]string, 0, len(firstRow.Data))
-	for col := range firstRow.Data {
+	// Compute the union of all columns across all rows in the batch.
+	// NoSQL sources (e.g. Redis hashes) can have heterogeneous fields,
+	// so different rows may carry different columns.
+	colSet := make(map[string]string) // col → column type
+	for _, row := range rows {
+		for col, typ := range row.ColumnTypes {
+			if _, exists := colSet[col]; !exists {
+				colSet[col] = typ
+			}
+		}
+		for col := range row.Data {
+			if _, exists := colSet[col]; !exists {
+				colSet[col] = "TEXT"
+			}
+		}
+	}
+	columns := make([]string, 0, len(colSet))
+	for col := range colSet {
 		columns = append(columns, col)
+	}
+	sort.Strings(columns)
+
+	// Build a merged column-types map from all rows for table creation.
+	mergedTypes := make(map[string]string, len(colSet))
+	for col, typ := range colSet {
+		mergedTypes[col] = typ
+	}
+	mergedRow := mysqlRow{
+		Table:       table,
+		PrimaryKey:  rows[0].PrimaryKey,
+		Data:        rows[0].Data,
+		ColumnTypes: mergedTypes,
+	}
+
+	if err := w.ensureTableExists(ctx, table, mergedRow, columns); err != nil {
+		return fmt.Errorf("ensure table exists: %w", err)
 	}
 
 	// Check conflict strategy
@@ -121,6 +157,139 @@ func (w *mysqlWriter) writeTable(ctx context.Context, table string, rows []mysql
 
 	// Default: overwrite (upsert)
 	return w.writeWithUpsert(ctx, table, columns, rows, failedKeys, errors)
+}
+
+func (w *mysqlWriter) ensureTableExists(ctx context.Context, table string, row mysqlRow, columns []string) error {
+	// Build a set of PK columns for fast lookup.
+	isPK := make(map[string]bool, len(row.PrimaryKey))
+	for col := range row.PrimaryKey {
+		isPK[col] = true
+	}
+
+	defs := make([]string, 0, len(columns)+1)
+	for _, col := range columns {
+		colType := "LONGTEXT"
+		if mapped, ok := row.ColumnTypes[col]; ok && mapped != "" {
+			colType = normalizeMySQLColumnType(mapped)
+		}
+		// MySQL does not allow TEXT types in PRIMARY KEY without a key
+		// length prefix. Use VARCHAR(768) instead so that auto-created
+		// tables from NoSQL sources (which default to TEXT) succeed.
+		if isPK[col] && isMySQLTextType(colType) {
+			colType = "VARCHAR(768)"
+		}
+		defs = append(defs, fmt.Sprintf("%s %s", quoteIdentifier(col), colType))
+	}
+
+	if len(row.PrimaryKey) > 0 {
+		pkCols := make([]string, 0, len(row.PrimaryKey))
+		for col := range row.PrimaryKey {
+			pkCols = append(pkCols, quoteIdentifier(col))
+		}
+		sort.Strings(pkCols)
+		defs = append(defs, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(pkCols, ", ")))
+	}
+
+	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)",
+		quoteIdentifier(table), strings.Join(defs, ",\n  "))
+
+	_, err := w.db.ExecContext(ctx, stmt)
+	if err != nil {
+		return fmt.Errorf("create table: %w", err)
+	}
+
+	// For NoSQL sources with heterogeneous fields, the first CREATE TABLE
+	// may not cover all columns. Add any missing columns via ALTER TABLE.
+	return w.addMissingColumns(ctx, table, columns, row, isPK)
+}
+
+// addMissingColumns checks which columns already exist in the table and
+// adds any that are missing. This handles heterogeneous data from NoSQL
+// sources where each batch may introduce new fields.
+func (w *mysqlWriter) addMissingColumns(ctx context.Context, table string, columns []string, row mysqlRow, isPK map[string]bool) error {
+	rows, err := w.db.QueryContext(ctx,
+		"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?", table)
+	if err != nil {
+		return nil // best-effort
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var colName string
+		if err := rows.Scan(&colName); err == nil {
+			existing[strings.ToLower(colName)] = true
+		}
+	}
+	_ = rows.Close()
+
+	for _, col := range columns {
+		if existing[strings.ToLower(col)] {
+			continue
+		}
+		colType := "LONGTEXT"
+		if mapped, ok := row.ColumnTypes[col]; ok && mapped != "" {
+			colType = normalizeMySQLColumnType(mapped)
+		}
+		if isPK[col] && isMySQLTextType(colType) {
+			colType = "VARCHAR(768)"
+		}
+		alterStmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s",
+			quoteIdentifier(table), quoteIdentifier(col), colType)
+		if _, err := w.db.ExecContext(ctx, alterStmt); err != nil {
+			if !isDuplicateColumnError(err) {
+				return fmt.Errorf("add column %s: %w", col, err)
+			}
+		}
+	}
+	return nil
+}
+
+// isDuplicateColumnError checks if a MySQL error is a "duplicate column" error.
+func isDuplicateColumnError(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "Duplicate column") ||
+		strings.Contains(s, "1060")
+}
+
+// isMySQLTextType returns true for MySQL text-like types that cannot be used
+// directly as PRIMARY KEY columns.
+func isMySQLTextType(colType string) bool {
+	switch strings.ToUpper(colType) {
+	case "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT":
+		return true
+	}
+	return false
+}
+
+func normalizeMySQLColumnType(colType string) string {
+	upper := strings.ToUpper(strings.TrimSpace(colType))
+	switch {
+	case upper == "":
+		return "LONGTEXT"
+	case strings.HasPrefix(upper, "INT"), strings.HasPrefix(upper, "TINYINT"),
+		strings.HasPrefix(upper, "SMALLINT"), strings.HasPrefix(upper, "MEDIUMINT"),
+		strings.HasPrefix(upper, "BIGINT"):
+		return upper
+	case strings.HasPrefix(upper, "FLOAT"), strings.HasPrefix(upper, "DOUBLE"),
+		strings.HasPrefix(upper, "DECIMAL"), strings.HasPrefix(upper, "NUMERIC"):
+		return upper
+	case strings.HasPrefix(upper, "VARCHAR"), strings.HasPrefix(upper, "CHAR"):
+		return upper
+	case strings.HasPrefix(upper, "TEXT"), strings.HasPrefix(upper, "TINYTEXT"),
+		strings.HasPrefix(upper, "MEDIUMTEXT"), strings.HasPrefix(upper, "LONGTEXT"):
+		return upper
+	case strings.HasPrefix(upper, "BLOB"), strings.HasPrefix(upper, "TINYBLOB"),
+		strings.HasPrefix(upper, "MEDIUMBLOB"), strings.HasPrefix(upper, "LONGBLOB"):
+		return upper
+	case strings.HasPrefix(upper, "DATETIME"), strings.HasPrefix(upper, "TIMESTAMP"),
+		upper == "DATE", upper == "TIME":
+		return upper
+	case strings.HasPrefix(upper, "BOOL"):
+		return "TINYINT(1)"
+	case strings.HasPrefix(upper, "JSON"):
+		return "JSON"
+	default:
+		return "LONGTEXT"
+	}
 }
 
 // writeWithUpsert uses chunked INSERT ON DUPLICATE KEY UPDATE for upsert operations.
@@ -153,10 +322,7 @@ func (w *mysqlWriter) writeWithUpsert(ctx context.Context, table string, columns
 		if chunkSize == 0 {
 			chunkSize = 1
 		}
-		end := i + chunkSize
-		if end > len(rows) {
-			end = len(rows)
-		}
+		end := min(i+chunkSize, len(rows))
 
 		chunk := rows[i:end]
 		if err := w.execChunkedUpsert(ctx, table, chunk, columns, queryPrefix, rowPlaceholder, querySuffix, failedKeys, errors); err != nil {
@@ -219,7 +385,7 @@ func (w *mysqlWriter) estimateChunkSize(rows []mysqlRow, columns []string, rowPl
 	// large BLOBs, which could cause chunks to exceed max_allowed_packet.
 	sampleSize := min(10, len(rows))
 	maxRowDataSize := 64 // minimum baseline for non-string types
-	for i := 0; i < sampleSize; i++ {
+	for i := range sampleSize {
 		var rowSize int
 		for _, col := range columns {
 			if v, ok := rows[i].Data[col]; ok {
@@ -247,12 +413,7 @@ func (w *mysqlWriter) estimateChunkSize(rows []mysqlRow, columns []string, rowPl
 	}
 
 	chunkSize := available / perRow
-	if chunkSize > maxRowsPerInsert {
-		chunkSize = maxRowsPerInsert
-	}
-	if chunkSize < 1 {
-		chunkSize = 1
-	}
+	chunkSize = max(min(chunkSize, maxRowsPerInsert), 1)
 
 	return min(chunkSize, len(rows))
 }
@@ -279,10 +440,7 @@ func (w *mysqlWriter) writeWithSkip(ctx context.Context, table string, columns [
 		if chunkSize == 0 {
 			chunkSize = 1
 		}
-		end := i + chunkSize
-		if end > len(rows) {
-			end = len(rows)
-		}
+		end := min(i+chunkSize, len(rows))
 
 		chunk := rows[i:end]
 		if err := w.execChunkedSkip(ctx, table, chunk, columns, queryPrefix, rowPlaceholder, failedKeys, errors); err != nil {
@@ -335,14 +493,14 @@ func (w *mysqlWriter) execChunkedSkip(ctx context.Context, table string, rows []
 // buildPlaceholders builds a placeholder string like "?, ?, ?".
 func buildPlaceholders(count int) string {
 	placeholders := make([]string, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		placeholders[i] = "?"
 	}
 	return strings.Join(placeholders, ", ")
 }
 
 // buildPKWhere builds a WHERE clause for primary key matching.
-func buildPKWhere(pk map[string]any, startIdx int) (string, []any) {
+func buildPKWhere(pk map[string]any, _ int) (string, []any) {
 	var clauses []string
 	var args []any
 

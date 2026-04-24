@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pageton/bridge-db/internal/config"
+	"github.com/pageton/bridge-db/internal/transform"
 	"github.com/pageton/bridge-db/pkg/provider"
 )
 
@@ -134,6 +135,68 @@ func TestRecordKeys_Dedup(t *testing.T) {
 	}
 	if p.totalWritten != 3 {
 		t.Errorf("expected totalWritten=3, got %d", p.totalWritten)
+	}
+}
+
+type pipelineConfigCaptureTransformer struct {
+	transform.NoopTransformer
+	received transform.TransformerConfig
+}
+
+func (c *pipelineConfigCaptureTransformer) Configure(cfg transform.TransformerConfig) {
+	c.received = cfg
+}
+
+func TestPipelinesBuildIndependentTransformerConfigs(t *testing.T) {
+	srcProvider := t.Name() + "_src"
+	dstProvider := t.Name() + "_dst"
+
+	transform.RegisterTransformer(srcProvider, dstProvider, func() transform.Transformer {
+		return &pipelineConfigCaptureTransformer{}
+	})
+
+	p1 := &Pipeline{
+		config: &config.MigrationConfig{
+			Source:      config.ConnectionConfig{Provider: srcProvider},
+			Destination: config.ConnectionConfig{Provider: dstProvider},
+			Transform: config.TransformConfig{
+				NullPolicy: "skip",
+				Mappings: map[string][]config.FieldMapping{
+					"users": {{Source: "first_name", Destination: "given_name"}},
+				},
+			},
+		},
+	}
+	p2 := &Pipeline{
+		config: &config.MigrationConfig{
+			Source:      config.ConnectionConfig{Provider: srcProvider + "_other"},
+			Destination: config.ConnectionConfig{Provider: dstProvider + "_other"},
+			Transform: config.TransformConfig{
+				NullPolicy: "error",
+			},
+		},
+	}
+
+	t1 := transform.GetTransformer(srcProvider, dstProvider, p1.buildTransformerConfig()).(*pipelineConfigCaptureTransformer)
+	t2 := transform.GetTransformer(srcProvider, dstProvider, p2.buildTransformerConfig()).(*pipelineConfigCaptureTransformer)
+
+	if t1.received.SrcDialect != transform.Dialect(srcProvider) {
+		t.Errorf("t1 SrcDialect = %q, want %q", t1.received.SrcDialect, srcProvider)
+	}
+	if t2.received.SrcDialect != transform.Dialect(srcProvider+"_other") {
+		t.Errorf("t2 SrcDialect = %q, want %q", t2.received.SrcDialect, srcProvider+"_other")
+	}
+	if t1.received.NullHandler == nil || t2.received.NullHandler == nil {
+		t.Fatal("expected both transformers to receive a NullHandler")
+	}
+	if t1.received.NullHandler.Policy == t2.received.NullHandler.Policy {
+		t.Errorf("expected different null policies, got %q for both", t1.received.NullHandler.Policy)
+	}
+	if t1.received.FieldMapping == nil {
+		t.Fatal("expected t1 FieldMapping to be configured")
+	}
+	if t2.received.FieldMapping != nil {
+		t.Fatal("expected t2 FieldMapping to remain nil")
 	}
 }
 
@@ -825,10 +888,7 @@ func TestKeyRestore_RingBufferSize(t *testing.T) {
 		for _, k := range cp.WrittenKeys {
 			p.writtenKeys.Store(k, true)
 		}
-		ringSize := len(cp.WrittenKeys)
-		if ringSize < p.opts.MaxWrittenKeys {
-			ringSize = p.opts.MaxWrittenKeys
-		}
+		ringSize := keyRingSizeFor(len(cp.WrittenKeys), p.opts.MaxWrittenKeys)
 		ring := make([]string, ringSize)
 		copy(ring, cp.WrittenKeys)
 		p.keyRing = ring
@@ -837,9 +897,8 @@ func TestKeyRestore_RingBufferSize(t *testing.T) {
 		atomic.StoreInt64(&p.totalWritten, cp.TotalWritten)
 	}
 
-	// Ring should be at least MaxWrittenKeys.
-	if len(p.keyRing) < p.opts.MaxWrittenKeys {
-		t.Errorf("ring size %d < MaxWrittenKeys %d", len(p.keyRing), p.opts.MaxWrittenKeys)
+	if len(p.keyRing) != p.opts.MaxWrittenKeys {
+		t.Errorf("expected ring size %d, got %d", p.opts.MaxWrittenKeys, len(p.keyRing))
 	}
 	// All 80 keys should be in the set — count via range over ring.
 	restoredCount := 0
@@ -876,21 +935,17 @@ func TestKeyRestore_LargeCheckpoint(t *testing.T) {
 	}
 
 	// Restore.
-	ringSize := len(cp.WrittenKeys)
-	if ringSize < p.opts.MaxWrittenKeys {
-		ringSize = p.opts.MaxWrittenKeys
-	}
+	ringSize := keyRingSizeFor(len(cp.WrittenKeys), p.opts.MaxWrittenKeys)
 	ring := make([]string, ringSize)
 	copy(ring, cp.WrittenKeys)
 	p.keyRing = ring
 	p.keyRingLen = len(cp.WrittenKeys)
 	p.keyRingHead = len(cp.WrittenKeys) % ringSize
 
-	// Ring should be 250 (larger than MaxWrittenKeys).
 	if len(p.keyRing) != 250 {
 		t.Errorf("expected ring size 250, got %d", len(p.keyRing))
 	}
-	if p.keyRingHead != 0 { // 250 % 250 = 0
+	if p.keyRingHead != 0 {
 		t.Errorf("expected head=0, got %d", p.keyRingHead)
 	}
 }
