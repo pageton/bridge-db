@@ -53,7 +53,10 @@ func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migr
 
 		for {
 			if err := ctx.Err(); err != nil {
-				scanCh <- scanResult{err: err}
+				select {
+				case scanCh <- scanResult{err: err}:
+				case <-ctx.Done():
+				}
 				return
 			}
 
@@ -115,7 +118,10 @@ func (p *Pipeline) stepTransfer(ctx context.Context, result *RunResult, ms *migr
 							"error", transformErr,
 							"batch", batchID+1,
 						)
-						scanCh <- scanResult{err: transformErr}
+						select {
+						case scanCh <- scanResult{err: transformErr}:
+						case <-ctx.Done():
+						}
 						return
 					}
 					log.Warn("transform error after retries, skipping batch",

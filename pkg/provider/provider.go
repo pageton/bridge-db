@@ -337,11 +337,20 @@ type Schema struct {
 	Tables []TableSchema
 }
 
+// ForeignKey describes a foreign key relationship.
+type ForeignKey struct {
+	Name              string   // Constraint name (optional)
+	Columns           []string // Source columns (FK side)
+	ReferencedTable   string   // Target table
+	ReferencedColumns []string // Target columns (PK side)
+}
+
 // TableSchema describes a single table.
 type TableSchema struct {
-	Name    string
-	Columns []ColumnSchema
-	Indexes []IndexSchema
+	Name        string
+	Columns     []ColumnSchema
+	Indexes     []IndexSchema
+	ForeignKeys []ForeignKey // NEW: foreign key relationships
 }
 
 // ColumnSchema describes a single column.

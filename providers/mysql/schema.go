@@ -60,10 +60,17 @@ func (m *mysqlSchemaMigrator) Inspect(ctx context.Context) (*provider.Schema, er
 			continue
 		}
 
+		// Get foreign keys for this table
+		fks, err := m.getTableForeignKeys(ctx, tableName)
+		if err != nil {
+			m.log.Debug("failed to get foreign keys", "table", tableName, "error", err)
+		}
+
 		tableSchema := provider.TableSchema{
-			Name:    tableName,
-			Columns: columns,
-			Indexes: indexes,
+			Name:        tableName,
+			Columns:     columns,
+			Indexes:     indexes,
+			ForeignKeys: fks,
 		}
 		schema.Tables = append(schema.Tables, tableSchema)
 	}
@@ -204,6 +211,69 @@ func (m *mysqlSchemaMigrator) getTableIndexes(ctx context.Context, table string)
 	}
 
 	return indexes, nil
+}
+
+// getTableForeignKeys retrieves foreign key relationships for a table.
+func (m *mysqlSchemaMigrator) getTableForeignKeys(ctx context.Context, table string) ([]provider.ForeignKey, error) {
+	query := `
+		SELECT
+			ccu.CONSTRAINT_NAME,
+			ccu.COLUMN_NAME,
+			kcu.TABLE_NAME AS REFERENCED_TABLE,
+			kcu.COLUMN_NAME AS REFERENCED_COLUMN
+		FROM information_schema.KEY_COLUMN_USAGE ccu
+		JOIN information_schema.TABLE_CONSTRAINTS tc
+			ON ccu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+			AND ccu.TABLE_SCHEMA = tc.TABLE_SCHEMA
+		LEFT JOIN information_schema.KEY_COLUMN_USAGE kcu
+			ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+			AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+		WHERE ccu.TABLE_SCHEMA = DATABASE()
+			AND ccu.TABLE_NAME = ?
+			AND tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
+		ORDER BY ccu.ORDINAL_POSITION
+	`
+
+	rows, err := m.db.QueryContext(ctx, query, table)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	// Group by constraint name
+	fkMap := make(map[string]*provider.ForeignKey)
+
+	for rows.Next() {
+		var fk provider.ForeignKey
+		var refTable, refCol, col sql.NullString
+
+		if err := rows.Scan(&fk.Name, &col, &refTable, &refCol); err != nil {
+			continue
+		}
+
+		if !col.Valid || !refTable.Valid {
+			continue
+		}
+
+		existing, exists := fkMap[fk.Name]
+		if !exists {
+			fk.ReferencedTable = refTable.String
+			fkMap[fk.Name] = &fk
+			existing = &fk
+		}
+
+		existing.Columns = append(existing.Columns, col.String)
+		if refCol.Valid {
+			existing.ReferencedColumns = append(existing.ReferencedColumns, refCol.String)
+		}
+	}
+
+	var fks []provider.ForeignKey
+	for _, fk := range fkMap {
+		fks = append(fks, *fk)
+	}
+
+	return fks, nil
 }
 
 // createTable creates a table with the given schema.
